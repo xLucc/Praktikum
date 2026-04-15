@@ -20,7 +20,9 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'torque_test = bin_picking.torque_test:main'
+            'torque_test = bin_picking.torque_test:main',
+            'test = bin_picking.test:main',
+            'camera_test = bin_picking.test.camera_test:main'
         ],
     },
 )
