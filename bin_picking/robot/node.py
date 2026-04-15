@@ -7,7 +7,7 @@ from rclpy.impl import rcutils_logger
 from rclpy.client import Client
 from pathlib import Path
 from rclpy.node import Node
-from bin_picking.common.path import get_package_root
+from bin_picking.common.helper import get_package_root
 from kr_msgs.srv import SetDiscreteOutput, MoveLinear, PauseMotion, ResumeMotion, SetCustomFrame, GetRobotPose, GetRobotState
 from kr_msgs.msg import SystemState
 
@@ -133,5 +133,8 @@ class RobotNode(Node):
                     self._logger.info(f'Service available: {attr.srv_name}.')
 
     def spin(self):
-        self.get_logger().info('Start spinning.')
+        self.get_logger().info(f'Node {self.__class__.__name__} start spining.')
         rclpy.spin(self)
+    
+    def close(self):
+        self.destroy_node()

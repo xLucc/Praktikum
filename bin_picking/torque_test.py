@@ -69,6 +69,8 @@ def main(args=None):
     sensitivity = float(cleaned) 
     plt.savefig(plot_path / f'Joint_torques_with_sensitivity_{sensitivity}_with_force_{force}_kg.png')
 
+    rclpy.shutdown()
+
 
 
 if __name__ == '__main__':
