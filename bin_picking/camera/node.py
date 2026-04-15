@@ -8,7 +8,6 @@ import functools
 import numpy as np
 from rclpy.impl import rcutils_logger
 from rclpy.node import Node
-# from rclpy.parameter import parameter_dict_from_yaml_file
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 from rcl_interfaces.srv import SetParameters
 from bin_picking.common.helper import load_dict_from_json, get_package_root
@@ -62,7 +61,7 @@ class Camera(Node):
         matches = sum(['color' in name, 'depth' in name, 'infra' in name])
 
         if matches != 1:
-            raise ValueError(f'No data availale for {name}')
+            raise ValueError(f'No data availale for {name}.')
         
         if 'infra' in name:
             temp = [i for i in self.data.keys() if 'infra' in i]
@@ -113,26 +112,18 @@ class Camera(Node):
         elif self._mode == 'default':
             self._setup_default()
         else:
-            raise RuntimeError(f'Unknown mode.')
+            raise ValueError(f'Unknown mode.')
 
-    # This methode requires a valid ros yaml file.
+    # Get the parameter configuration and set them accordingly.
     def _set_params(self):
-        '''
-        This Method requires the yaml file, to be a valid ros yaml file.
-        The given file sets up the realsense camera node for its required purpose. 
-
-        Example: 
-        /node_name:
-            ros__paramters:
-                param_name: param_value
-        '''
 
         self._logger.info('Setting up the parameters.')
 
         # For default.
         if not os.path.exists(self._opt_path):
-            raise RuntimeError(f'The parameter file does not exist.')
+            raise FileNotFoundError(f'The parameter file does not exist.')
         
+        # Spawn an executer for the scope to set the params.
         executer = rclpy.executors.SingleThreadedExecutor()
         executer.add_node(self)
 
@@ -140,10 +131,9 @@ class Camera(Node):
         client = self.create_client(SetParameters, '/camera/camera/set_parameters')
         client.wait_for_service()
 
-        # Fetcht the option provided by the user to set the required paramters.
+        # Fetch the option provided by the user to set the required paramters.
         req = SetParameters.Request()
-        param_dict = parameter_dict_from_yaml_file(self._opt_path, target_node='/camera')
-        req.parameters = [val for val in param_dict.values()]
+        req.parameters = self._get_params_from_file()
         f = client.call_async(req)
         executer.spin_until_future_complete(f)
         executer.remove_node(self)
@@ -157,7 +147,7 @@ class Camera(Node):
     The config file is expecte to have this interface:
     {
         "sub_name" : "topic_name",
-        "sub_name"  : "topic_name",
+        "sub_name" : "topic_name",
         ...
     }
     sub_name should include the wanted message type and camera type, everything else can be chosen freely.
@@ -321,7 +311,7 @@ class Camera(Node):
         if 'rgbd' in name:
             return RGBD, self._rgbd_cb
         
-        raise RuntimeError(f'No message type available for {name}')
+        raise ValueError(f'No message type available for {name}')
 
     # Build the name for the call back function to set the key in the data dict.
     def _get_name(self, name: str) -> str:
@@ -347,14 +337,56 @@ class Camera(Node):
                         continue
 
                 # Exhausted every supported camera type.
-                raise RuntimeError(f'Unsupported camera type in: {name}.')
+                raise ValueError(f'Unsupported camera type in: {name}.')
             else: 
                 continue
         
         # Exhausted every supported message type.
-        raise RuntimeError(f'Unsupported message type in: {name}.')
-            
+        raise ValueError(f'Unsupported message type in: {name}.')
 
+    # Attention the supported parameter are hard coded, add your desired param here or change the function to be dynamic.
+    def _get_params_from_file(self):
+        '''
+        This method requires the json to be in this format:
+        {
+            "name_of_param" : bool
+        }
+
+        Param check is hard coded so it only supports boolean values for the switch to rgbd, given by realsense. If you want to configure other paramter, change the supported params to a function call, which fetches every available parameter.
+        Also add a function, which checks the paramter for it's supposed paramtervalue, so you can send int, etc. But don't forget to add the check function for the json.
+        '''
+
+        # Load the params options from the file.
+        opt = load_dict_from_json(self._cfg_path / 'camera_parameter_cfg.json')
+
+        supported_params = ['enable_sync', 'enable_rgbd', 'align_depth.enable', 'enable_color', 'enable_depth']
+
+        params = []
+
+        for key, val in opt.items():
+
+            # Check the values for errors.
+            if not isinstance(val, bool):
+                raise ValueError(f'Expected type bool, got: {type(val).__name__} for value.')
+
+            if key not in supported_params:
+                raise ValueError(f'Unsupported parameter {key}.')
+            
+            # Construct the parametervalue
+            param_value = ParameterValue()
+            param_value.type = 1
+            param_value.bool = val
+
+            # Construct the paramter
+            param = Parameter()
+            param.name = key
+            param.value = param_value
+
+            params.append(param)
+
+        return params
+
+    # Daemon function.
     def spin(self):
         self._logger.info(f'Node {self.__class__.__name__} start spining.')
         rclpy.spin(self)
