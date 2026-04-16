@@ -13,77 +13,277 @@ from rcl_interfaces.srv import SetParameters
 from bin_picking.common.helper import load_dict_from_json, get_package_root
 from sensor_msgs.msg import Image, CameraInfo
 from realsense2_camera_msgs.msg import RGBD
+from typing import Tuple
 
 
 class Camera(Node):
+    '''
+    Data Structures:
 
-    def __init__(self, name='rgbd_node', timeout: float=5.0, opt_path: str='', mode: str='default', *args):
+        Image:
+            time_step: Time stamp in seconds and nanoseconds
+            resolution: The resolution of the corresponding camera.
+            encoding: The image encoding.
+            is_bigendian: Defines the order of the MSB and LSB.
+            step: The index at which the next row starts.
+            data: The raw image data, expressed as byte array.
+        
+        CameraInfo:
+            resolution: The resolution of the corresponding camera.
+            model: The distortion model.
+            distortion: The distortion parameter.
+            intrinsic: The intrinsic matrix.
+            projection: The projection matrix.
+    '''
+
+    def __init__(self, name='rgbd_node', timeout: float=5.0, mode: str='default', *args):
         super().__init__(name)
 
         self._logger = rcutils_logger.RcutilsLogger('rgbd')
 
         self._cfg_path = get_package_root() / 'bin_picking' / 'data' / 'config'
-
         self._timeout = timeout
-        self._opt_path = opt_path
         self._mode = mode
         self._lock = threading.Lock()
+        self._cfg_file = self._cfg_path / 'camera_parameter_cfg.json'
+        self._is_init = False
 
         self._subs = {}
 
-        self.data = {}
+        self._data = {}
 
-        if not self._init_camera():
-            self._logger.error("Camera node didn't initialise.")
-            raise TimeoutError
+        self._init_camera()
+
+        # Set params if necessary.
+        if mode != 'default':
+            self._set_params()
         
-        # NOTE: The dependency function doen't exist for foxy.
-        #if mode != 'default':
-            #self._set_params()
-        
-        self._setup_clients()
+        self._setup_subscriptions()
         self._logger.info('Ready to start.')
         
-    # Close the realsense camera node.
+    
     def close(self):
+        '''
+        Close the realsene camera node.
+        '''
         os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+
+    # Wait to prevent empty data.
+    def wait_for_init(self, wait: float, max_count: int):
+        '''
+        Call this method outside the spin thread.
+
+        Params:
+            wait: Time to wait until the thread cotinues.
+            max_count: Max amount of retries.
+        '''
+
+        for attempt in range(max_count):
+
+            self._logger.info(f'Waiting for initialisation, attempt {attempt + 1} / {max_count}.')
+
+            with self._lock:
+                
+                if self._data:
+                    return
+                
+            time.sleep(wait)
+        
+        raise TimeoutError(f'Camera did not initialise after {max_count} attemps.')
 
     @property
     def available_data(self) -> dict:
-        self._require_mode('default', 'rgbd')
         with self._lock:
-            return self.data.copy()
+            return self._data.copy()
     
-    def get_camera_info(self, name: str):
+    @property
+    def infra_data(self) -> Tuple[dict, bool]:
+        '''
+        Gets every available infra data.
 
-        self._require_mode('default')
+        Returns:
+            dict: The infra data.
+            bool: If the operation was successfull.
 
-        matches = sum(['color' in name, 'depth' in name, 'infra' in name])
+        Data Structure:
+            infraX_camera_info: camera_info
+            infraX_image: image
+        '''
+        with self._lock:
+            val = {
+                k: self._data.get(k, {}).copy()
+                for k in self._data
+                if 'infra' in k
+            }
+            
+        return val, bool(val)
+
+    @property
+    def color_data(self) -> Tuple[dict, bool]:
+        '''
+        Gets every available color data.
+
+        Returns:
+            dict: The color data.
+            bool: If the operation was successfull.
+
+        Data Structure:
+            color_camera_info: camera_info
+            color_image: image
+            
+        '''
+        with self._lock:
+
+            val = {
+                k: self._data.get(k, {}).copy()
+                for k in self._data
+                if 'color' in k
+            }
+        
+        return val, bool(val)
+
+
+    @property
+    def depth_data(self) -> Tuple[dict, bool]:
+        '''
+        Gets every available infra data.
+
+        Returns:
+            dict: The depth data.
+            bool: If the operation was successfull.
+
+        Data Structure:
+            depth_camera_info: camera_info
+            depth_image: image 
+        '''
+
+        with self._lock:
+            val = {
+                k: self._data.get(k, {}).copy()
+                for k in self._data
+                if 'depth' in k
+            }
+
+        return val, bool(val)
+
+    @property
+    def rgbd_data(self) -> Tuple[dict, bool]:
+        '''
+        Gets the rgbd data.
+
+        Returns:
+            dict: The rgbd data.
+            bool: If the operation was successfull
+
+        Data Structure:
+
+            color:
+                resolution: height, width
+                model: distortion model
+                distortion: distortion parameters
+                intrinsic: intrinsic matrix, shape(3,3)
+                projection: projection matrix, shape(3,4)
+                encoding: image encoding
+                is_bigendian: defines the order of the MSB and LSB
+                step: defines at which index the new row starts
+                data: the raw image data as byte array
+            depth:
+                model: distortion model
+                distortion: distortion parameters
+                intrinsic: intrinsic matrix, shape(3,3)
+                projection: projection matrix, shape(3,4)
+                encoding: image encoding
+                is_bigendian: defines the order of the MSB and LSB
+                step: defines at which index the new row starts
+                data: the raw image data as byte array
+                
+        '''
+
+        if self._mode != 'rgbd':
+            self._logger.info('Wrong mode.')
+            return {}, False
+        
+        with self._lock:
+            val = self._data.get('rgbd', {}).copy()
+
+        return val, bool(val)
+    
+
+    def get_camera_info(self, name: str) -> Tuple[dict, bool]:
+        '''
+        Gets the requested camera info.
+
+        Params:
+            name: The name of the wanted data, e.g color.
+        
+        Returns:
+            dict: The requested data.
+            bool: If the operation was successfull.
+        '''
+        # Check the request for supported data
+        matches = (('color'in name) + ('depth' in name) + ('infra' in name))
 
         if matches != 1:
-            raise ValueError(f'No data availale for {name}.')
+            self._logger.warning(f'Unsupported data type: {name}.')
+            return {}, False
         
+        # Gets every availabel infra data, if requested.
         if 'infra' in name:
-            temp = [i for i in self.data.keys() if 'infra' in i]
-            val = []
 
-            for infra in temp:
-                # Skip every infra that isn't camera info
-                if not 'camera_info' in infra:
-                    continue
-                
-                with self._lock:
-                    val.append(self.data.get(infra, {}))
-
-            return val
-
-        elif 'color' in name:
             with self._lock:
-                return self.data.get('color_camera_info', {})
+
+                val = {
+                    k: self._data.get(k, {}).copy()
+                    for k in self._data
+                    if 'infra' in k and 'camera_info' in k
+                }
+
+            return val, bool(val)
+
+        # Gets either the color or depth camera info
+        key = 'color_camera_info' if 'color' in name else 'depth_camera_info'
+        with self._lock:
+            temp = self._data.get(key, {}).copy()
+        return temp, bool(temp)
+
+    def get_image(self, name:str) -> Tuple[dict, bool]:
+        '''
+        Gets the requested image.
+
+        Params:
+            name: The name of the wanted data, e.g depth.
+    
+        Returns:
+            dict: The requested data.
+            bool: If the operation was sucessfull.
+        '''
+
+        # Check the request for supported data
+        matches = (('color'in name) + ('depth' in name) + ('infra' in name))
+
+        if matches != 1:
+            return {}, False
         
-        else:
+        # Gets every available infra image
+        if 'infra' in name:
+
             with self._lock:
-                return self.data.get('depth_camera_info', {})
+
+                val = {
+                    k: self._data.get(k, {}).copy()
+                    for k in self._data
+                    if 'infra' in k and 'image' in k
+                }
+
+            return val, bool(val)
+
+        # Gets either the color image or the depth
+        key = 'color_image' if 'color' in name else 'depth_image'
+        with self._lock:
+            val = self._data.get(key, {}).copy()
+
+        return val, bool(val)
+
 
     # Private methods.
 
@@ -96,14 +296,16 @@ class Camera(Node):
         while True:
 
             if time.time() - start >= self._timeout:
-                return False
+                self._logger.error("Camera node din't initialise.")
+                raise TimeoutError(f'Timeout while initialising the camera.')
 
             res = subprocess.run('ros2 topic list | grep /camera/camera', shell=True, capture_output=True, text=True)
 
             if res.stdout:
-                return True
+                return 
 
-    def _setup_clients(self):
+    
+    def _setup_subscriptions(self):
 
         self._logger.info(f'Setting up the {self._mode} subscriptions.')
 
@@ -120,23 +322,23 @@ class Camera(Node):
         self._logger.info('Setting up the parameters.')
 
         # For default.
-        if not os.path.exists(self._opt_path):
+        if not os.path.exists(self._cfg_file):
             raise FileNotFoundError(f'The parameter file does not exist.')
         
-        # Spawn an executer for the scope to set the params.
-        executer = rclpy.executors.SingleThreadedExecutor()
-        executer.add_node(self)
+        # Spawn an executor for the scope to set the params.
+        executor = rclpy.executors.SingleThreadedExecutor()
+        executor.add_node(self)
 
         # Create the param client.
-        client = self.create_client(SetParameters, '/camera/camera/set_parameters')
+        client = self.create_client(SetParameters, 'camera/camera/set_parameters')
         client.wait_for_service()
 
         # Fetch the option provided by the user to set the required paramters.
         req = SetParameters.Request()
         req.parameters = self._get_params_from_file()
         f = client.call_async(req)
-        executer.spin_until_future_complete(f)
-        executer.remove_node(self)
+        executor.spin_until_future_complete(f)
+        executor.remove_node(self)
 
         self._logger.info('Successfully set the parameter')
 
@@ -173,7 +375,6 @@ class Camera(Node):
 
         self._logger.info('Done with the setup.')
 
-    # NOTE: Add check for the val, if it is a existing topic.
     # Setup the necessary subscriptions for rgbd mode
     def _setup_rgbd(self):
         # Get the subscription dict
@@ -188,6 +389,8 @@ class Camera(Node):
 
             # Get the corresponding message type and callback function.
             msg_type, cb = self._get_msg_type(val)
+
+            self._logger.info(f'Setup the sub: {val}, with name: {self._get_name(val)}')
 
             # Create the subscription and add it to the dict.
             self._subs[key] = self.create_subscription(msg_type, val, functools.partial(cb, topic_name=self._get_name(val)), 5)
@@ -206,8 +409,8 @@ class Camera(Node):
             d: float64[]
             k: float64[9] shape (3,3)
             p: float64[12] shape (3,4)
-            binning_x: unit32
-            binning_y: unit32
+            binning_x: uint32
+            binning_y: uint32
         '''
         pixel = msg.height, msg.width
 
@@ -220,7 +423,7 @@ class Camera(Node):
         }
 
         with self._lock:
-            self.data[topic_name] = data_dict
+            self._data[topic_name] = data_dict
         
 
     # Callback function for every image message type.
@@ -247,10 +450,10 @@ class Camera(Node):
         }
 
         with self._lock: 
-            self.data[topic_name] = data_dict
+            self._data[topic_name] = data_dict
 
 
-    # Callback function for evey rgbd message type.
+    # Callback function for every rgbd message type.
     def _rgbd_cb(self, msg, topic_name):
         '''
         Message:
@@ -294,7 +497,7 @@ class Camera(Node):
         }
 
         with self._lock:
-            self.data[topic_name] = data_dict
+            self._data[topic_name] = data_dict
 
     # Enforces that some method can only be called by the right mode, to prevent wrong behavior.
     def _require_mode(self, *states):
@@ -315,38 +518,35 @@ class Camera(Node):
 
     # Build the name for the call back function to set the key in the data dict.
     def _get_name(self, name: str) -> str:
+
         # Only rgbd has camera info and image in the same message.
         if 'rgbd' in name:
             return 'rgbd'
 
-        msg_types = ['camera_info', 'image']
-        camera_types = ['infra1', 'infra2', 'color', 'depth']
+        supported_msg_types = ['camera_info', 'image_raw', 'image_rect_raw']
+        supported_camera_types = ['infra1', 'infra2', 'color', 'depth']
 
-        # Check every msg type
-        for mt in msg_types:
-            # If the current message type is in the name, check which camera type it is.If not, then check the next one.
+        # Split the topic name into segements.
+        segments = name.split('/')
 
-            if mt in name:
-                
-                for ct in camera_types:
-                    # If the current camera type is in the name, return the str. If not, then the camera type is not supported.
-                    
-                    if ct in name:
-                        return ct + '_' + mt
-                    else:
-                        continue
+        camera_type = segments[-2]
+        msg_type = segments[-1]
 
-                # Exhausted every supported camera type.
-                raise ValueError(f'Unsupported camera type in: {name}.')
-            else: 
-                continue
+        if camera_type not in supported_camera_types:
+            raise ValueError(f'Unsupported camera type in {name}')
         
-        # Exhausted every supported message type.
-        raise ValueError(f'Unsupported message type in: {name}.')
+        if msg_type not in supported_msg_types:
+            raise ValueError(f'Unsupported message type in {name}')
 
-    # Attention the supported parameter are hard coded, add your desired param here or change the function to be dynamic.
+        # Map both image types to _image.
+        key_msg = 'image' if 'image' in msg_type else msg_type
+
+        return f'{camera_type}_{key_msg}'
+
+
     def _get_params_from_file(self):
         '''
+        Attention the supported parameter are hard coded, add your desired param here or change the function to be dynamic.
         This method requires the json to be in this format:
         {
             "name_of_param" : bool
@@ -374,8 +574,8 @@ class Camera(Node):
             
             # Construct the parametervalue
             param_value = ParameterValue()
-            param_value.type = 1
-            param_value.bool = val
+            param_value.type = ParameterType.PARAMETER_BOOL
+            param_value.bool_value = val
 
             # Construct the paramter
             param = Parameter()
@@ -388,5 +588,5 @@ class Camera(Node):
 
     # Daemon function.
     def spin(self):
-        self._logger.info(f'Node {self.__class__.__name__} start spining.')
+        self._logger.info(f'Node {self.__class__.__name__} start spinning.')
         rclpy.spin(self)
