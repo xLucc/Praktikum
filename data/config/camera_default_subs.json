@@ -1,6 +1,6 @@
 {
     "color1": "camera/camera/color/image_raw",
     "color2": "camera/camera/color/camera_info",
-    "infra1": "/camera/camera/infra1/image_rect_raw",
+    "infra1": "camera/camera/infra1/image_rect_raw",
     "depth": "camera/camera/depth/image_rect_raw"
 }
