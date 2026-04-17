@@ -419,7 +419,9 @@ class Camera(Node):
 
             res = subprocess.run('ros2 topic list | grep /camera/camera', shell=True, capture_output=True, text=True)
 
+            # Wait for the camera to setup internally.
             if res.stdout:
+                time.sleep(1.0)
                 return 
             
             time.sleep(0.2)
