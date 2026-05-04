@@ -27,13 +27,6 @@ class Camera(Node):
             is_bigendian: Defines the order of the MSB and LSB.
             step: The index at which the next row starts.
             data: The raw image data, expressed as byte array.
-        
-        CameraInfo:
-            resolution: The resolution of the corresponding camera.
-            model: The distortion model.
-            distortion: The distortion parameter.
-            intrinsic: The intrinsic matrix.
-            projection: The projection matrix.
     '''
 
     def __init__(self, name='rgbd_node', timeout: float=5.0, mode: str='default', *args):
@@ -171,18 +164,19 @@ class Camera(Node):
         return True
 
 
-
     def close(self):
-        '''
-        Close the realsense camera node.
-        '''
-        # Safe guard, if the init raises the timeout, close can't be called.
+
         if not hasattr(self, 'process'):
-            self._logger.info('Can not close something that does not exists.')
+            self._logger.info('Can not close something that does not exist.')
             return
         
-        os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-
+        # Terminate all realsense processes.
+        subprocess.run(['kill', str(self.process.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['pkill', '-f', 'realsense2_camera_node'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.process.wait()
+        subprocess.run(['ros2', 'daemon', 'stop'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['ros2', 'daemon', 'start'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
     # Wait to prevent empty data.
     def wait_for_init(self, wait: float, max_count: int):
         '''
@@ -337,6 +331,16 @@ class Camera(Node):
         Returns:
             dict: The requested data.
             bool: If the operation was successfully.
+
+        Data Structure:
+            resolution: The resolution of the corresponding camera.
+            model: The distortion model.
+            distortion: The distortion parameter.
+            intrinsic: The intrinsic matrix.
+            projection: The projection matrix.
+
+        Intrinsic:
+
         '''
         # Check the request for supported data
         matches = (('color'in name) + ('depth' in name) + ('infra' in name))
@@ -540,9 +544,10 @@ class Camera(Node):
             binning_y: uint32
         '''
 
-        pixel = msg.width, msg.height
+        pixel = msg.height, msg.width
 
         data_dict = {
+            'time_stamp': msg.header.stamp,
             'resolution' : pixel,
             'model' : msg.distortion_model,
             'distortion' : np.array(msg.d),
@@ -577,7 +582,7 @@ class Camera(Node):
             'encoding' : msg.encoding,
             'is_bigendian' : msg.is_bigendian,
             'step' : msg.step,
-            'data' : msg.data
+            'data' : np.frombuffer(msg.data, dtype=np.uint8)
         }
 
         with self._lock: 
@@ -617,7 +622,7 @@ class Camera(Node):
                 'encoding': msg.rgb.encoding,
                 'is_bigendian': msg.rgb.is_bigendian,
                 'step': msg.rgb.step,
-                'data': msg.rgb.data
+                'data': np.frombuffer(msg.rgb.data, dtype=np.uint8)
             },
 
             'depth' : {
@@ -629,7 +634,7 @@ class Camera(Node):
                 'encoding': msg.depth.encoding,
                 'is_bigendian': msg.depth.is_bigendian,
                 'step': msg.depth.step,
-                'data': msg.depth.data
+                'data': np.frombuffer(msg.depth.data, dtype=np.uint8)
             }
         }
 
