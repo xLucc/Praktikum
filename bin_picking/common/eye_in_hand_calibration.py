@@ -7,10 +7,10 @@ import threading
 import os
 import numpy as np
 import cv2 as cv
-import copy
+import cv2.aruco as aruco
 from pyzbar.pyzbar import decode as decode_qr
 from pathlib import Path
-from typing import Optional, Union, Tuple, Set
+from typing import Optional, Union, Tuple, Set, List, Dict
 from scipy.spatial.transform import Rotation as R
 from dataclasses import dataclass
 from enum import Enum
@@ -85,7 +85,7 @@ def main(**kwargs):
 
     count = 0
     # Buffer storing Data objects (transform, depth, color) for deferred parallel processing.
-    buf: list[Data] = []
+    buf: List[Data] = []
     h, w = cam.color_resolution
     shape = (w, h, 3) # Turn the resolution into np shape.
     size = int(np.prod(shape)) * np.dtype(np.uint8).itemsize # w * h * 3 * 1
@@ -115,21 +115,12 @@ def main(**kwargs):
             
             clean = frame.copy()
         
-            circles = get_qr_codes(frame)
+            detections = get_aruco_codes(frame)
 
-            if not np.all(circles == 0):
-                temp = extract_color(circles=circles, color=frame)
-                hsv_circles = [(convert_bgr_to_hsv(bgr)) for bgr in temp]
-                classified_circles = [classify_color(hsv) for hsv in hsv_circles]
-                
-                for c, text in zip(circles, classified_circles):
-                    textX = min(c[0] + c[2] + 5, w-1)
-                    textY = max(min(c[1], h-1),0)
-
-                    cv.circle(frame, center=(c[0], c[1]), radius=c[2], color=(0,0,0), thickness=2)
-                    # cv.putText(frame, text, (int(textX), int(textY)), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)  Doesn't work
+            if detections:
+                draw_aruco_codes(frame, detections)
             else:
-                logger.info("Couldn't find any circles.")
+                logger.info("Couldn't find any ArUco markers.")
 
             clone = undistort_img(frame, intrinsics)
             cv.imshow('circles', clone)
@@ -168,8 +159,8 @@ def main(**kwargs):
     store_buf(buf, buf_path)
 
     # Process all buffered frames once the capture loop has ended.
-    point_3d_list, circle_list = process_buf(buf, intrinsics, processor, mapping)
-    axis_list   = map_circle_to_3d(point_3d_list, circle_list)
+    point_3d_list, marker_list = process_buf(buf, intrinsics, processor, mapping)
+    axis_list   = map_marker_to_3d(point_3d_list, marker_list)
     invert_axis = mapping['invert_axis']
     T_cam_2_target_list = [
         construct_coordinate_system(Px=Px, Py=Py, Pz=Pz, invert_axis=invert_axis)
@@ -285,7 +276,7 @@ def deconstruct_T_into_R_and_t(T_list: list) -> Tuple[list, list]:
     return R_list, t_list
 
 
-def map_circle_to_3d(point_3d_list: list, circle_list: list) -> list:
+def map_marker_to_3d(point_3d_list: list, circle_list: list) -> list:
     """
     Convert 2D circle descriptors to 3D axis points using the reconstructed point cloud.
 
@@ -325,39 +316,79 @@ def map_circle_to_3d(point_3d_list: list, circle_list: list) -> list:
 
     return axis_points_list
 
+def draw_aruco_codes(frame: np.ndarray, detections: Dict[int, np.ndarray]) -> None:
+    """
+    Draw a circle and ID label for each detected ArUco marker onto the frame (in-place).
+
+    Args:
+        frame:      BGR image to draw on.
+        detections: Dict of marker_id -> [cx, cy, radius] from get_aruco_codes.
+    """
+    for marker_id, c in detections.items():
+        cv.circle(frame, center=(c[0], c[1]), radius=c[2], color=(0, 0, 0), thickness=2)
+        cv.putText(frame, str(marker_id), (c[0] + c[2] + 5, c[1]),
+                   cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        
+def get_aruco_codes(color: np.ndarray) -> Dict[int, np.ndarray]:
+    """
+    Detect ArUco markers in a BGR image and return their centre and radius.
+
+    Each detected marker is described by its ID (key) and a [cx, cy, radius]
+    array (value), where the radius is derived from the minimum enclosing circle
+    of the four marker corners — matching the downstream format.
+
+    Args:
+        color: BGR input image.
+
+    Returns:
+        Dict mapping marker ID (int) to uint16 array [cx, cy, radius].
+        Empty dict if no markers are detected.
+    """
+    gray            = cv.cvtColor(color, cv.COLOR_BGR2GRAY)
+    dictionary      = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
+    parameters      = aruco.DetectorParameters()
+    detector        = aruco.ArucoDetector(dictionary, parameters)
+    corners, ids, _ = detector.detectMarkers(gray)
+
+    if ids is None:
+        return {}
+
+    result = {}
+    for marker_corners, marker_id in zip(corners, ids.flatten()):
+        pts          = marker_corners[0].astype(np.float32)  # shape (4, 2)
+        (cx, cy), r  = cv.minEnclosingCircle(pts)
+        result[int(marker_id)] = np.array([int(cx), int(cy), int(r)], dtype=np.uint16)
+
+    return result
+
 
 def find_points(color: np.ndarray, mapping: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Locate the three calibration-marker circles (X, Y, Z axis markers) in a color image.
-
-    The function detects all circles via Hough transform, extracts their dominant color,
-    converts to HSV, and maps each detected color to the corresponding coordinate axis
-    using the provided color-to-axis mapping.
+    Locate the three ArUco axis markers in a color image using the ID-to-axis mapping.
 
     Args:
         color:   BGR image containing the calibration target.
-        mapping: Dict loaded from mapping.json assigning color names to axis labels
-                 (e.g. {"x_axis": "red", "y_axis": "blue", "z_axis": "green", ...}).
+        mapping: Dict mapping axis labels to ArUco IDs
+                 (e.g. {"x_axis": 0, "y_axis": 1, "z_axis": 2, ...}).
 
     Returns:
-        Tuple (x, y, z) where each element is a circle descriptor array [cx, cy, r]
-        corresponding to the X, Y, and Z axis markers respectively.
+        Tuple (x, y, z) where each element is a [cx, cy, radius] array.
+
+    Raises:
+        CalibrationError: If any required marker ID is not detected in the image.
     """
-    circles = get_circles(color=color)
+    detections = get_aruco_codes(color)
 
-    bgr_decoded_circles = extract_color(color=color, circles=circles)
-    hsv_decoded_circles = [convert_bgr_to_hsv(bgr) for bgr in bgr_decoded_circles]
+    x_id = mapping['x_axis']
+    y_id = mapping['y_axis']
+    z_id = mapping['z_axis']
 
-    # Ensure all string values in the mapping are converted to Color enum instances.
-    mapping = {k: Color.from_string(v) if isinstance(v, str) else v for k, v in mapping.items()}
+    missing = [ax for ax, mid in [('x', x_id), ('y', y_id), ('z', z_id)]
+               if mid not in detections]
+    if missing:
+        raise CalibrationError(f'ArUco marker(s) not detected for axis: {missing}')
 
-    axis_list = get_points(mapping, hsv_decoded_circles, color, circles)
-
-    x = circles[axis_list.index(Axis.X)]
-    y = circles[axis_list.index(Axis.Y)]
-    z = circles[axis_list.index(Axis.Z)]
-
-    return x, y, z
+    return detections[x_id], detections[y_id], detections[z_id]
 
 
 def process_buf(buf: list, intrinsics: dict, processor: ImageProcessing, mapping: dict) -> Tuple[list, list]:
@@ -388,14 +419,14 @@ def process_buf(buf: list, intrinsics: dict, processor: ImageProcessing, mapping
             executor.submit(filtering_and_construct_3d, d.color, d.depth, intrinsics, processor)
             for d in buf
         ]
-        futures_circles = [
+        futures_marker = [
             executor.submit(find_points, d.color, mapping)
             for d in buf
         ]
         points_3d_list = [f.result() for f in futures_3d]
-        circles_list   = [f.result() for f in futures_circles]
+        marker_list   = [f.result() for f in futures_marker]
 
-    return points_3d_list, circles_list
+    return points_3d_list, marker_list
 
 
 def filtering_and_construct_3d(color: np.ndarray, depth: np.ndarray, intrinsics: dict, processor: ImageProcessing) -> np.ndarray:
@@ -661,22 +692,6 @@ def extract_color(color: np.ndarray, circles: np.ndarray) -> list:
 
 
 def get_mapping(path: Path) -> dict:
-    """
-    Load and validate the color-to-axis mapping from a JSON file.
-
-    The JSON must contain exactly the keys: x_axis, y_axis, z_axis, invert_axis.
-    All axis values must be strings; invert_axis must be a list of three 0/1 integers.
-
-    Args:
-        path: Path to mapping.json.
-
-    Returns:
-        Validated mapping dict.
-
-    Raises:
-        KeyError:   If any required key is missing.
-        ValueError: If any value has an unexpected type or invert_axis is malformed.
-    """
     mapping = load_dict_from_json(path)
 
     should_include = {'x_axis', 'y_axis', 'z_axis', 'invert_axis'}
@@ -684,13 +699,14 @@ def get_mapping(path: Path) -> dict:
     if missing:
         raise KeyError(f'Missing key(s): {missing}')
 
-    for v in mapping.values():
-        if not isinstance(v, (str, list)):
-            raise ValueError(f'Wrong type for value {v!r}. Expected str or list, got {type(v)}')
+    # Axis values must now be ints (ArUco IDs)
+    for k in ('x_axis', 'y_axis', 'z_axis'):
+        if not isinstance(mapping[k], int):
+            raise ValueError(f'{k} must be an int (ArUco ID), got: {type(mapping[k])}')
 
     invert = mapping['invert_axis']
     if not isinstance(invert, list) or len(invert) != 3 or not all(v in (0, 1) for v in invert):
-        raise ValueError(f'invert_axis must be a list of 3 booleans, e.g. [1, 0, 0], got: {invert}')
+        raise ValueError(f'invert_axis must be a list of 3 booleans, got: {invert}')
 
     return mapping
 
