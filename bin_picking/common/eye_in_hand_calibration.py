@@ -14,6 +14,8 @@ from scipy.spatial.transform import Rotation as R
 from dataclasses import dataclass
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Process, Lock, Event
+from multiprocessing.shared_memory import SharedMemory
 from bin_picking.robot.node import RobotNode
 from bin_picking.camera.camera import RealSenseCamera
 from bin_picking.common.image_processing import ImageProcessing
@@ -83,40 +85,70 @@ def main(**kwargs):
     count = 0
     # Buffer storing Data objects (transform, depth, color) for deferred parallel processing.
     buf: list[Data] = []
+    res = cam.color_resolution
+    size = int(np.prod(res)) * np.dtype(np.uint8).itemsize
+
+    shm = SharedMemory(create=True, size=size)
+    lock = Lock()
+    frame_event = Event()
+    stop_event = Event()
+    
 
     while True:
+        p = Process(target=cam.stream_parallel, args=(shm.name, lock, frame_event, stop_event), daemon=True)
         logger.info(f'Iteration: {count}')
+        p.start()
+        img = np.ndarray(cam.color_resolution, dtype=np.uint8, buffer=shm.buf)
+        clean = None
 
-        try:
-            img = cam.stream()
-        except KeyboardInterrupt:
-            logger.info('Quitting...')
+        while not stop_event.is_set():
+            frame_event.wait(timeout=1.0)
+
+            if not frame_event.is_set():
+                continue
+
+            frame_event.clear()
+
+            with lock:
+                frame = img.copy()
+            
+            clean = frame.copy()
+        
+            circles = get_circles(frame)
+            temp = extract_color(circles=circles, color=frame)
+            hsv_circles = [(convert_bgr_to_hsv(bgr)) for bgr in temp]
+            classified_circles = [classify_color(hsv) for hsv in hsv_circles]
+            
+            for c, text in zip(circles, classified_circles):
+                cv.circle(frame, center=(c[0], c[1]), radius=c[2], color=(0,0,0), thickness=2)
+                cv.putText(frame, text, (c[0] + c[2] + 5, c[1]), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+
+            clone = undistort_img(frame, intrinsics)
+            cv.imshow('circles', clone)
+
+        stop_event.clear()
+        p.terminate()
+        p.join()
+        
+        cmd = prompt_cmd('Discard the image or use it.', {Cmd.DISCARD, Cmd.KEEP, Cmd.EXIT})
+        
+        if cmd == Cmd.EXIT:
             break
-        
-        circles = get_circles(img)
-        temp = extract_color(circles=circles, color=img)
-        hsv_circles = [(convert_bgr_to_hsv(bgr)) for bgr in temp]
-        classified_circles = [classify_color(hsv) for hsv in hsv_circles]
-        clone = copy.deepcopy(img)
-        
-        for c, text in zip(circles, classified_circles):
-            cv.circle(clone, center=(c[0], c[1]), radius=c[2], color=(0,0,0), thickness=2)
-            cv.putText(clone, text, (c[0] + c[2] + 5, c[1]), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
-
-        clone = undistort_img(clone, intrinsics)
-        cv.imshow('circles', clone)
-        
-        if prompt_cmd('Discard the image or use it.', {Cmd.DISCARD, Cmd.KEEP}) == Cmd.DISCARD:
+        elif cmd == Cmd.DISCARD:
             continue
 
         count += 1
 
         depth = take_pic(cam, processor)
         T     = get_robot_transform(robot)
+        clean = clean if clean is not None else np.zeros(cam.color_resolution)
 
-        img  = undistort_img(img, intrinsics)
-        data = Data(T=T, depth=depth, color=img)
+        data = Data(T=T, depth=depth, color=undistort_img(clean, intrinsics))
         buf.append(data)
+    
+
+    shm.close()
+    shm.unlink()
 
     store_buf(buf, buf_path)
 
