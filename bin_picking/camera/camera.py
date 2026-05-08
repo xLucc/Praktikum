@@ -1,6 +1,7 @@
 import time
 import sys
 import logging
+import signal
 import pyrealsense2 as rs
 import numpy as np
 from multiprocessing.shared_memory import SharedMemory
@@ -117,12 +118,21 @@ class RealSenseCamera(Camera):
                 raise KeyboardInterrupt
 
 
-    def stream_parallel(self, name, lock, frame_event, stop_event) -> bool:
+    def stream_parallel(self, name, lock, frame_event, shape):
+
+        shm = SharedMemory(name=name, create=False)
+        img = np.ndarray(shape, dtype=np.uint8, buffer=shm.buf)
+
+        
+        def handle_sigterm(signum, frame):
+            shm.close()
 
         while True:
-            shm = SharedMemory(name=name, create=False)
+
+            # Catch the sigterm and close the shared memory.
+            signal.signal(signal.SIGTERM, handle_sigterm) 
+
             frame = self._pipeline.wait_for_frames().get_color_frame()
-            img = np.ndarray(self.color_resolution, dtype=np.uint8, buffer=shm.buf)
 
             if not frame:
                 continue
@@ -131,16 +141,6 @@ class RealSenseCamera(Camera):
                 img[:] = frame.get_data()
             frame_event.set()
 
-            cv.imshow('img', img)
-            key = cv.waitKey(1) & 0xFF
-
-            if key == ord("q"):
-                stop_event.set()
-                break
-        
-        shm.close()
-            
-    
 
     def _get_data(self, num_frames, mode):
         frames = []

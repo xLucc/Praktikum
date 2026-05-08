@@ -85,23 +85,22 @@ def main(**kwargs):
     count = 0
     # Buffer storing Data objects (transform, depth, color) for deferred parallel processing.
     buf: list[Data] = []
-    res = cam.color_resolution
-    size = int(np.prod(res)) * np.dtype(np.uint8).itemsize
+    h, w = cam.color_resolution
+    shape = (w, h, 3) # Turn the resolution into np shape.
+    size = int(np.prod(shape)) * np.dtype(np.uint8).itemsize # w * h * 3 * 1
 
     shm = SharedMemory(create=True, size=size)
     lock = Lock()
     frame_event = Event()
-    stop_event = Event()
-    
 
     while True:
-        p = Process(target=cam.stream_parallel, args=(shm.name, lock, frame_event, stop_event), daemon=True)
+        p = Process(target=cam.stream_parallel, args=(shm.name, lock, frame_event, shape), daemon=True)
         logger.info(f'Iteration: {count}')
         p.start()
-        img = np.ndarray(cam.color_resolution, dtype=np.uint8, buffer=shm.buf)
+        img = np.ndarray(shape, dtype=np.uint8, buffer=shm.buf)
         clean = None
 
-        while not stop_event.is_set():
+        while True:
             frame_event.wait(timeout=1.0)
 
             if not frame_event.is_set():
@@ -115,20 +114,30 @@ def main(**kwargs):
             clean = frame.copy()
         
             circles = get_circles(frame)
-            temp = extract_color(circles=circles, color=frame)
-            hsv_circles = [(convert_bgr_to_hsv(bgr)) for bgr in temp]
-            classified_circles = [classify_color(hsv) for hsv in hsv_circles]
-            
-            for c, text in zip(circles, classified_circles):
-                cv.circle(frame, center=(c[0], c[1]), radius=c[2], color=(0,0,0), thickness=2)
-                cv.putText(frame, text, (c[0] + c[2] + 5, c[1]), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+
+            if not np.all(circles == 0):
+                temp = extract_color(circles=circles, color=frame)
+                hsv_circles = [(convert_bgr_to_hsv(bgr)) for bgr in temp]
+                classified_circles = [classify_color(hsv) for hsv in hsv_circles]
+                
+                for c, text in zip(circles, classified_circles):
+                    cv.circle(frame, center=(c[0], c[1]), radius=c[2], color=(0,0,0), thickness=2)
+                    cv.putText(frame, text, (c[0] + c[2] + 5, c[1]), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+            else:
+                logger.info("Couldn't find any circles.")
 
             clone = undistort_img(frame, intrinsics)
             cv.imshow('circles', clone)
+            cv.imshow('clean', clean)
+            key = cv.waitKey(1) & 0xFF
 
-        stop_event.clear()
+            if key == ord("q"):
+                break
+
+
         p.terminate()
         p.join()
+        cv.destroyAllWindows()
         
         cmd = prompt_cmd('Discard the image or use it.', {Cmd.DISCARD, Cmd.KEEP, Cmd.EXIT})
         
@@ -141,7 +150,7 @@ def main(**kwargs):
 
         depth = take_pic(cam, processor)
         T     = get_robot_transform(robot)
-        clean = clean if clean is not None else np.zeros(cam.color_resolution)
+        clean = clean if clean is not None else np.zeros(shape)
 
         data = Data(T=T, depth=depth, color=undistort_img(clean, intrinsics))
         buf.append(data)
@@ -577,7 +586,10 @@ def get_circles(color: np.ndarray) -> np.ndarray:
         minRadius=MIN_RADIUS, maxRadius=MAX_RADIUS,
     )
 
-    return np.around(circles[0]).astype(np.uint16)
+    if circles is not None:
+        return np.around(circles[0]).astype(np.uint16)
+    else:
+        return np.zeros((1,3))
 
 
 def extract_color(color: np.ndarray, circles: np.ndarray) -> list:
