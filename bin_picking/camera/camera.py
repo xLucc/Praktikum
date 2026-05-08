@@ -3,6 +3,7 @@ import sys
 import logging
 import pyrealsense2 as rs
 import numpy as np
+from multiprocessing.shared_memory import SharedMemory
 import cv2 as cv
 from pathlib import Path
 import json
@@ -76,6 +77,10 @@ class RealSenseCamera(Camera):
 
     def get_rgb(self, num_frames: int=1):
         return self._get_data(num_frames=num_frames, mode='color')
+    
+    @property
+    def color_resolution(self) -> tuple:
+        return self._sensors_to_setup['color']['resolution']
 
 
     def stream(self) ->np.ndarray:
@@ -100,7 +105,7 @@ class RealSenseCamera(Camera):
                 continue
             
 
-            img = np.asanyarray(frame.get_data())
+            img = np.asanyarray(frame.get_data()).astype(np.uint8)
             cv.imshow('img', img)
             key = cv.waitKey(1) & 0xFF
 
@@ -111,6 +116,30 @@ class RealSenseCamera(Camera):
                 cv.destroyAllWindows()
                 raise KeyboardInterrupt
 
+
+    def stream_parallel(self, name, lock, frame_event, stop_event) -> bool:
+
+        while True:
+            shm = SharedMemory(name=name, create=False)
+            frame = self._pipeline.wait_for_frames().get_color_frame()
+            img = np.ndarray(self.color_resolution, dtype=np.uint8, buffer=shm.buf)
+
+            if not frame:
+                continue
+            
+            with lock:
+                img[:] = frame.get_data()
+            frame_event.set()
+
+            cv.imshow('img', img)
+            key = cv.waitKey(1) & 0xFF
+
+            if key == ord("q"):
+                stop_event.set()
+                break
+        
+        shm.close()
+            
     
 
     def _get_data(self, num_frames, mode):
