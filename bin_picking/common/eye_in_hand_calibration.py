@@ -6,8 +6,9 @@ import logging
 import os
 import numpy as np
 import cv2 as cv
+import copy
 from pathlib import Path
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, Set
 from scipy.spatial.transform import Rotation as R
 from dataclasses import dataclass
 from enum import Enum
@@ -88,6 +89,22 @@ def main(**kwargs):
         except KeyboardInterrupt:
             logger.info('Quitting...')
             break
+        
+        circles = get_circles(img)
+        temp = extract_color(circles=circles, color=img)
+        hsv_circles = [(convert_bgr_to_hsv(bgr)) for bgr in temp]
+        classified_circles = [classify_color(hsv) for hsv in hsv_circles]
+        clone = copy.deepcopy(img)
+        
+        for c, text in zip(circles, classified_circles):
+            cv.circle(clone, center=(c[0], c[1]), radius=c[2], color=(0,0,0), thickness=2)
+            cv.putText(clone, text, (c[0] + c[2] + 5, c[1]), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+
+        clone = undistort_img(clone, intrinsics)
+        cv.imshow('circles', clone)
+        
+        if prompt_cmd('Discard the image or use it.', {Cmd.DISCARD, Cmd.KEEP}) == Cmd.DISCARD:
+            continue
 
         count += 1
 
@@ -783,6 +800,32 @@ class Axis(Enum):
             if ax.value == raw:
                 return ax
         raise ValueError(f'Unsupported axis: {raw!r}')
+    
+# An enum for the possible user commands, with a helper function to parse them from input.
+class Cmd(Enum):
+    CONTINUE = "c"
+    QUIT = "q"
+    DISCARD = "d"
+    KEEP = "k"
+    EXIT = "e"
+
+    @classmethod
+    def from_input(cls, raw: str) -> Optional['Cmd']:
+        raw = raw.strip().lower()
+        for cmd in cls:
+            if cmd.value == raw:
+                return cmd
+        return None
+
+# Prompt the user for a command until a valid one is given or the maximum number of tries is reached.
+def prompt_cmd(prompt: str, valid: Set["Cmd"], max_tries: int = 5) -> Cmd:
+    options = "/".join(cmd.value for cmd in valid)
+    for _ in range(max_tries):
+        cmd = Cmd.from_input(input(f"{prompt} [{options}]: "))
+        if cmd in valid:
+            return cmd
+        print("Invalid input.")
+    raise RuntimeError(f"No valid input after {max_tries} tries.")
 
 
 if __name__ == '__main__':
