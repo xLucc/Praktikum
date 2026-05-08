@@ -1,0 +1,6 @@
+{
+    "x_axis" : "red",
+    "y_axis" : "green",
+    "z_axis" : "blue",
+    "invert_axis" : [0,0,0]
+}

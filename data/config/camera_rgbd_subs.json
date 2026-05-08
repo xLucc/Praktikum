@@ -3,8 +3,5 @@
     "depth_info": "camera/camera/depth/camera_info",
     "depth_img": "camera/camera/depth/image_rect_raw",
     "infra1": "camera/camera/infra1/image_rect_raw",
-    "infra2": "camera/camera/infra2/image_rect_raw",
-    "infra1_info": "camera/camera/infra1/camera_info",
-    "rgb_img": "camera/camera/color/image_raw",
-    "rgb_info": "camera/camera/color/camera_info"
+    "infra1_info": "camera/camera/infra1/camera_info"
 }

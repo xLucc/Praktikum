@@ -1,0 +1,6 @@
+{
+    "guided_radius": 3,
+    "guided_eps" : 1e-3,
+    "sharp_lambda": 0.5,
+    "residual_clamp": 0.01
+}

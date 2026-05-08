@@ -1,0 +1,10 @@
+{
+    "depth" : {
+        "resolution" : [1280,720],
+        "fps": 30
+    },
+    "color" : {
+        "resolution": [1280, 720],
+        "fps" : 30
+    }
+}
