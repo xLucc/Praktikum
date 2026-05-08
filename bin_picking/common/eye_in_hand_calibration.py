@@ -3,6 +3,7 @@ import argparse
 import sys
 import h5py
 import logging
+import threading
 import os
 import numpy as np
 import cv2 as cv
@@ -72,6 +73,8 @@ def main(**kwargs):
 
     cam       = RealSenseCamera(align=True, adv=str(cfg_path / 'high_density.json'))
     robot     = RobotNode()
+    node      = threading.Thread(target=robot.spin, daemon=True)
+    node.start()
     processor = ImageProcessing(cfg_path=str(cfg_path / 'processing_cfg.json'))
 
     intrinsics = load_intrinsics(calibration_path / 'intrinsics.hdf5')
