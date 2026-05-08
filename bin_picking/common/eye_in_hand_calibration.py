@@ -8,6 +8,7 @@ import os
 import numpy as np
 import cv2 as cv
 import copy
+from pyzbar.pyzbar import decode as decode_qr
 from pathlib import Path
 from typing import Optional, Union, Tuple, Set
 from scipy.spatial.transform import Rotation as R
@@ -114,7 +115,7 @@ def main(**kwargs):
             
             clean = frame.copy()
         
-            circles = get_circles(frame)
+            circles = get_qr_codes(frame)
 
             if not np.all(circles == 0):
                 temp = extract_color(circles=circles, color=frame)
@@ -122,8 +123,11 @@ def main(**kwargs):
                 classified_circles = [classify_color(hsv) for hsv in hsv_circles]
                 
                 for c, text in zip(circles, classified_circles):
+                    textX = min(c[0] + c[2] + 5, w-1)
+                    textY = max(min(c[1], h-1),0)
+
                     cv.circle(frame, center=(c[0], c[1]), radius=c[2], color=(0,0,0), thickness=2)
-                    cv.putText(frame, text, (c[0] + c[2] + 5, c[1]), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+                    # cv.putText(frame, text, (int(textX), int(textY)), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)  Doesn't work
             else:
                 logger.info("Couldn't find any circles.")
 
@@ -184,6 +188,35 @@ def main(**kwargs):
     )
     store_calib(R_cam_2_tfp, t_cam_2_tfp, hand_eye_path)
 
+def get_qr_codes(color: np.ndarray) -> np.ndarray:
+    """
+    Detect QR codes in a BGR image and return their bounding circle descriptors.
+
+    For each detected QR code the bounding polygon is used to compute a
+    minimum enclosing circle, matching the [cx, cy, radius] format of the
+    former Hough-circle output so that all downstream code remains unchanged.
+
+    Args:
+        color: BGR input image.
+
+    Returns:
+        Nx3 uint16 array of detected QR codes as circles [cx, cy, radius],
+        or a zero array of shape (1, 3) if nothing is detected.
+    """
+    gray    = cv.cvtColor(color, cv.COLOR_BGR2GRAY)
+    decoded = decode_qr(gray)
+
+    if not decoded:
+        return np.zeros((1, 3), dtype=np.uint16)
+
+    result = []
+    for qr in decoded:
+        pts    = np.array(qr.polygon, dtype=np.float32)
+        pts_xy = np.array([[p.x, p.y] for p in pts], dtype=np.float32)
+        (cx, cy), radius = cv.minEnclosingCircle(pts_xy)
+        result.append([int(cx), int(cy), int(radius)])
+
+    return np.array(result, dtype=np.uint16)
 
 def store_calib(rotation: np.ndarray, translation: np.ndarray, path: Path) -> None:
     """
@@ -591,7 +624,7 @@ def get_circles(color: np.ndarray) -> np.ndarray:
     if circles is not None:
         return np.around(circles[0]).astype(np.uint16)
     else:
-        return np.zeros((1,3))
+        return np.zeros((1,3)).astype(np.uint16)
 
 
 def extract_color(color: np.ndarray, circles: np.ndarray) -> list:
