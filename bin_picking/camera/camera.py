@@ -73,6 +73,10 @@ class RealSenseCamera(Camera):
         self.logger.info('Stop the pipeline.')
         self._pipeline.stop()
 
+    def start(self):
+        self.logger.info('Start pipeline.')
+        self._profile = self._pipeline.start()
+
     def get_depth(self, num_frames: int=1):
         return self._get_data(num_frames=num_frames, mode='depth')
 
@@ -119,16 +123,16 @@ class RealSenseCamera(Camera):
 
 
     def stream_parallel(self, name, lock, frame_event, shape):
-
+        self.start()
         shm = SharedMemory(name=name, create=False)
         img = np.ndarray(shape, dtype=np.uint8, buffer=shm.buf)
 
-        
+
         def handle_sigterm(signum, frame):
             shm.close()
+            self.stop()
 
         while True:
-
             # Catch the sigterm and close the shared memory.
             signal.signal(signal.SIGTERM, handle_sigterm) 
 

@@ -96,6 +96,7 @@ def main(**kwargs):
     while True:
         p = Process(target=cam.stream_parallel, args=(shm.name, lock, frame_event, shape), daemon=True)
         logger.info(f'Iteration: {count}')
+        cam.stop()
         p.start()
         img = np.ndarray(shape, dtype=np.uint8, buffer=shm.buf)
         clean = None
@@ -138,6 +139,7 @@ def main(**kwargs):
         p.terminate()
         p.join()
         cv.destroyAllWindows()
+        cam.start()
         
         cmd = prompt_cmd('Discard the image or use it.', {Cmd.DISCARD, Cmd.KEEP, Cmd.EXIT})
         

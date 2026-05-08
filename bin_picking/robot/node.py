@@ -34,7 +34,7 @@ class RobotNode(Node):
         self._resume = self.create_client(ResumeMotion, 'kr/motion/resume')
         self._grp = self.create_client(GetRobotPose, 'kr/robot/get_robot_pose')
         self._grs = self.create_client(GetRobotState, 'kr/system/get_robot_state')
-        self._gsf = self.create_client(GetSystemFrame, 'kr/system/get_system_frame')
+        self._gsf = self.create_client(GetSystemFrame, 'kr/robot/get_system_frame')
         self._gss = self.create_subscription(SystemState, 'kr/system/state', self._state_cb_fill, 10)
 
     # Getter
@@ -98,7 +98,7 @@ class RobotNode(Node):
         event = threading.Event()
 
         def cb(future):
-            result = future.result
+            result = future.result()
 
             if result.success:
                 val[0,:] = result.pos
