@@ -1,35 +1,15 @@
 import time
 import sys
-import json
 import logging
-import inspect
 import pyrealsense2 as rs
 import numpy as np
-from abc import ABC, abstractmethod
+import cv2 as cv
 from pathlib import Path
+import json
+from abc import ABC, abstractmethod
 from typing import Optional
-# from bin_picking.camera.camera_interface import Camera
-# from bin_picking.common.helper import load_dict_from_json, get_project_dir
-
-
-
-def get_project_dir() -> Path:
-    return Path("/home/fabian/praktikum/src/bin_picking")
-
-def load_dict_from_json(path: Path) -> dict:
-    with open(path, 'r') as f:
-        return json.load(f)
-    
-class Camera(ABC):
-
-    @abstractmethod
-    def get_rgb(self)->list:
-        pass
-
-    @abstractmethod
-    def get_depth(self)-> list:
-        pass
-
+from bin_picking.camera.camera_interface import Camera
+from bin_picking.common.helper import load_dict_from_json, get_project_dir
 
 
 class RealSenseCamera(Camera):
@@ -49,7 +29,7 @@ class RealSenseCamera(Camera):
         else:
             self._get_serial()
 
-        self.logger = logging.Logger(f'RealSense_{self._serial}')
+        self.logger = logging.getLogger(f'RealSense_{self._serial}')
 
         self._pipeline = rs.pipeline()
         self._config = rs.config()
@@ -80,13 +60,59 @@ class RealSenseCamera(Camera):
         self._profile = self._pipeline.start(self._config)
         self._warm_up()
 
+    def __del__(self):
+        self.logger.info('Clean up.')
+
+        if hasattr(self, '_profile'):
+            self._pipeline.stop()
+        
+
+    def stop(self):
+        self.logger.info('Stop the pipeline.')
+        self._pipeline.stop()
+
     def get_depth(self, num_frames: int=1):
         return self._get_data(num_frames=num_frames, mode='depth')
 
     def get_rgb(self, num_frames: int=1):
         return self._get_data(num_frames=num_frames, mode='color')
 
+
+    def stream(self) ->np.ndarray:
+
+        '''
+        Streams the color image.
+        
+        Returns:
+            img (np.ndarray): If wanted return the last img.
+
+        Raises:
+            KeyboardInterrupt: To exit the stream.
+        '''
+
+        self.logger.info('To save the image, press s. \n To quit the stream, press q.')
+
+        while True:
+
+            frame = self._pipeline.wait_for_frames().get_color_frame()
+
+            if not frame:
+                continue
+            
+
+            img = np.asanyarray(frame.get_data())
+            cv.imshow('img', img)
+            key = cv.waitKey(1) & 0xFF
+
+            if key == ord("s"):
+                cv.destroyAllWindows()
+                return img
+            elif key == ord("q"):
+                cv.destroyAllWindows()
+                raise KeyboardInterrupt
+
     
+
     def _get_data(self, num_frames, mode):
         frames = []
         self._fill_frames(num_frames, frames)
@@ -98,6 +124,7 @@ class RealSenseCamera(Camera):
             return [np.asarray(d.get_depth_frame().get_data()) for d in frames]
         else:
             return [np.asarray(c.get_color_frame().get_data()) for c in frames]
+
 
 
 
@@ -230,6 +257,4 @@ class RealSenseCamera(Camera):
 
     def _warm_up(self):
         for _ in range(20):
-            self._pipeline.wait_for_frames()
-
-
+            self._pipeline.wait_for_frames(timeout_ms=10000)

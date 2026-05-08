@@ -6,9 +6,10 @@ import sys
 from rclpy.impl import rcutils_logger
 from rclpy.client import Client
 from pathlib import Path
+from typing import Optional
 from rclpy.node import Node
 from bin_picking.common.helper import get_package_root
-from kr_msgs.srv import SetDiscreteOutput, MoveLinear, PauseMotion, ResumeMotion, SetCustomFrame, GetRobotPose, GetRobotState
+from kr_msgs.srv import SetDiscreteOutput, MoveLinear, PauseMotion, ResumeMotion, SetCustomFrame, GetRobotPose, GetRobotState, GetSystemFrame
 from kr_msgs.msg import SystemState
 
 
@@ -33,6 +34,7 @@ class RobotNode(Node):
         self._resume = self.create_client(ResumeMotion, 'kr/motion/resume')
         self._grp = self.create_client(GetRobotPose, 'kr/robot/get_robot_pose')
         self._grs = self.create_client(GetRobotState, 'kr/system/get_robot_state')
+        self._gsf = self.create_client(GetSystemFrame, 'kr/system/get_system_frame')
         self._gss = self.create_subscription(SystemState, 'kr/system/state', self._state_cb_fill, 10)
 
     # Getter
@@ -72,6 +74,51 @@ class RobotNode(Node):
         with self._lock:
             return np.array(self._state_list), np.array(self._trq_list)
 
+    
+    def sys_frame(self, target: str, ref: str) -> Optional[np.ndarray]:
+
+        if target == ref:
+            self._logger.warning('Can not reference the same frame to it self.')
+            return
+        
+        if not isinstance(target, str):
+            self._logger.error(f'Expected target to be type str, got: {type(target)}.')
+            return
+        
+        if not isinstance(ref, str):
+            self._logger.error(f'Expected ref type to be str, got: {type(ref)}.')
+            return
+            
+        
+        msg = GetSystemFrame.Request()
+        msg.name = target
+        msg.ref = ref
+
+        val = np.zeros((2,3), dtype=np.float64)
+        event = threading.Event()
+
+        def cb(future):
+            result = future.result
+
+            if result.success:
+                val[0,:] = result.pos
+                val[1,:] = result.rot
+            else:
+                self._logger.info('Call was unsuccessfull.')
+            
+            event.set()
+
+        f = self._gsf.call_async(msg)
+        f.add_done_callback(cb)
+
+        if not event.wait(5.0):
+            self._logger.warning('Timeout.')
+
+        return val
+
+
+
+        
 
     # Setter
 
@@ -105,7 +152,7 @@ class RobotNode(Node):
         
         self._logger.info('Message delivered successfully.')
 
-        return result
+        return bool(result)
 
 
 
