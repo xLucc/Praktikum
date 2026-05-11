@@ -127,37 +127,52 @@ class RealSenseCamera(Camera):
                 raise KeyboardInterrupt
 
 
-    def stream_parallel(self, name, lock, frame_event, shape):
+    def stream_parallel(self, name, lock, frame_event, shape, exit_event):
         self.start()
         shm = SharedMemory(name=name, create=False)
         img = np.ndarray(shape, dtype=np.uint8, buffer=shm.buf)
 
 
         def handle_sigterm(signum, frame):
-            shm.close()
-            self.stop()
+            exit_event.set()
 
-        while True:
-            # Catch the sigterm and close the shared memory.
-            signal.signal(signal.SIGTERM, handle_sigterm) 
+        # Catch the sigterm and close the shared memory.
+        signal.signal(signal.SIGTERM, handle_sigterm)
 
+        while not exit_event.is_set():
             frame = self._pipeline.wait_for_frames().get_color_frame()
 
             if not frame:
                 continue
             
-            with lock:
-                img[:] = frame.get_data()
+            aquired = lock.acquire(timeout=1.0)
+
+            if not aquired:
+                continue
+            
+            try:
+                img[:] = np.asanyarray(frame.get_data())
+            finally:
+                lock.release()
+            
             frame_event.set()
+
+        shm.close()
+        self.stop()
 
 
     def _get_data(self, num_frames, mode):
         frames = []
+        # start_fill = time.time()
         self._fill_frames(num_frames, frames)
+        # self.logger.info(f'Took {(time.time() - start_fill):.4f} sec.')
 
-        if self._dual:
+        # start_align = time.time()
+        if self._dual: 
             frames = [self._align.process(f) for f in frames]
 
+        # res = time.time() - start_align
+        # self.logger.info(f'Took {res:.4f} sec')
         if mode == 'depth':
             return [np.asarray(d.get_depth_frame().get_data()) for d in frames]
         else:

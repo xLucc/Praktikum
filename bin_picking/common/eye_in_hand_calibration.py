@@ -4,6 +4,7 @@ import sys
 import h5py
 import logging
 import threading
+import time
 import os
 import numpy as np
 import cv2 as cv
@@ -15,7 +16,7 @@ from scipy.spatial.transform import Rotation as R
 from dataclasses import dataclass
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor
-from multiprocessing import Process, Lock, Event
+from multiprocessing import Process, Semaphore, Event
 from multiprocessing.shared_memory import SharedMemory
 from bin_picking.robot.node import RobotNode
 from bin_picking.camera.camera import RealSenseCamera
@@ -94,17 +95,15 @@ def main(**kwargs):
         size = int(np.prod(shape)) * np.dtype(np.uint8).itemsize # w * h * 3 * 1
 
         shm = SharedMemory(create=True, size=size)
-        lock = Lock()
+        lock = Semaphore(1)
         frame_event = Event()
-        startup_event = Event()
+        exit_event = Event()
 
         while True:
-            p = Process(target=cam.stream_parallel, args=(shm.name, lock, frame_event, shape, startup_event), daemon=True)
+            p = Process(target=cam.stream_parallel, args=(shm.name, lock, frame_event, shape, exit_event), daemon=True)
             logger.info(f'Iteration: {count}')
             cam.stop()
             p.start()
-            startup_event.wait()
-            startup_event.clear()
             frame_event.clear()
             img = np.ndarray(shape, dtype=np.uint8, buffer=shm.buf)
             clean = None
@@ -126,8 +125,6 @@ def main(**kwargs):
 
                 if detections:
                     draw_aruco_codes(frame, detections)
-                else:
-                    logger.info("Couldn't find any ArUco markers.")
 
                 clone = undistort_img(frame, intrinsics)
                 cv.imshow('circles', clone)
@@ -138,8 +135,15 @@ def main(**kwargs):
                     break
 
 
-            p.terminate()
-            p.join()
+            exit_event.set()
+            logger.info('Close process')
+            p.join(timeout=3.0)
+
+            if p.is_alive():
+                p.terminate()
+                p.join()
+            
+            exit_event.clear()
             cv.destroyAllWindows()
             cam.start()
             
@@ -152,7 +156,10 @@ def main(**kwargs):
 
             count += 1
 
+            logger.info('Take pictures.')
             depth = take_pic(cam, processor)
+
+            logger.info('Get transform.')
             T     = get_robot_transform(robot)
             clean = clean if clean is not None else np.zeros(shape)
 
@@ -186,6 +193,8 @@ def main(**kwargs):
         R_target2cam=R_target_2_cam,
         t_target2cam=t_target_2_cam,
     )
+    logger.info(f'Rotation: {R_cam_2_tfp}')
+    logger.info(f'Translation: {t_cam_2_tfp}')
     store_calib(R_cam_2_tfp, t_cam_2_tfp, hand_eye_path)
 
 def get_qr_codes(color: np.ndarray) -> np.ndarray:
@@ -565,7 +574,7 @@ def get_robot_transform(robot: RobotNode) -> np.ndarray:
     return T
 
 
-def take_pic(camera: RealSenseCamera, processor: ImageProcessing, num_depth: int = 15, num_color: int = 1) -> np.ndarray:
+def take_pic(camera: RealSenseCamera, processor: ImageProcessing, num_depth: int = 9, num_color: int = 1) -> np.ndarray:
     """
     Capture a temporally filtered depth image from the RealSense camera.
 
@@ -582,7 +591,9 @@ def take_pic(camera: RealSenseCamera, processor: ImageProcessing, num_depth: int
         2D float array containing the median-filtered depth image.
     """
     depth_frames = camera.get_depth(num_depth)
+    # start = time.time()
     depth_img    = processor.median_filtering_over_time(depth_frames)
+    # print(f'Filtering took {(time.time() - start)} sec.')
     return depth_img
 
 

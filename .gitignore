@@ -1,4 +1,5 @@
 test/
 *__pycache__
 *.png
+*.hdf5
 data/image_processing
