@@ -169,8 +169,7 @@ def main(**kwargs):
         shm.close()
         shm.unlink()
     else: 
-        load_buf(buf_path)
-
+        buf = load_buf(buf_path)
 
     if not kwargs['skip']:
         store_buf(buf, buf_path)
@@ -188,16 +187,23 @@ def main(**kwargs):
     R_target_2_cam, t_target_2_cam = deconstruct_T_into_R_and_t(T_cam_2_target_list)
     R_tfp_2_base,   t_tfp_2_base   = deconstruct_T_into_R_and_t(T_base_2_tfp_list)
 
+
+    print(f'rotation {R_target_2_cam}')
+    print(f'translation {t_tfp_2_base}')
+
     R_cam_2_tfp, t_cam_2_tfp = cv.calibrateHandEye(
         R_gripper2base=R_tfp_2_base,
         t_gripper2base=t_tfp_2_base,
         R_target2cam=R_target_2_cam,
         t_target2cam=t_target_2_cam,
     )
+    R_cam_2_tfp = np.asarray(R_cam_2_tfp)
+
     logger.info(f'Rotation: {R_cam_2_tfp}')
     logger.info(f'Translation: {t_cam_2_tfp}')
+    plot_calib_params(R_cam_2_tfp, t_cam_2_tfp)
     store_calib(R_cam_2_tfp, t_cam_2_tfp, hand_eye_path)
-
+                
 def get_qr_codes(color: np.ndarray) -> np.ndarray:
     """
     Detect QR codes in a BGR image and return their bounding circle descriptors.
@@ -562,7 +568,7 @@ def get_robot_transform(robot: RobotNode) -> np.ndarray:
         InvalidRobotTransform: If the robot returns None or an all-zero pose,
                                which indicates a communication or initialisation error.
     """
-    euler_cords = robot.sys_frame('tfc', 'base')
+    euler_cords = robot.sys_frame('tfc', 'world')
 
     if euler_cords is None:
         raise InvalidRobotTransform
@@ -968,25 +974,24 @@ def get_args(**kwargs):
 
     return kwargs
 
-def plot_calib_params(rotaion: np.ndarray, translation: np.ndarray):
-    T = np.eye(4)
-    T[:3, :3] = rotaion
-    T[:3, 3]  = translation.ravel()
-
+def plot_calib_params(rotation: np.ndarray, translation: np.ndarray):
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
+    translation = translation.ravel()
+    ax.scatter(0,0,0, translation)
+    colors = ['red', 'blue', 'green']
+    for i, c in enumerate(colors):
+        direction = np.eye(3)[i]
+        ax.quiver(0,0,0, *direction, color=c, length=30)
 
-    theta, phi = np.meshgrid(np.linspace(0, 2*np.pi, 100), np.linspace(0, np.pi, 100))
-    sphere_radius = 0.05
+    for i, c in enumerate(colors):
+        ax.quiver(*translation, *rotation[:3, i], color=c, normalize=True, length=30)
 
-    sphere_points = np.array([
-        sphere_radius * np.cos(theta) * np.sin(phi),
-        sphere_radius * np.sin(theta) * np.sin(phi),
-        sphere_radius * np.cos(phi),
-        np.ones_like(theta)
-    ])  # (4, 100, 100)
-
-    sphere_t = (T @ sphere_points.reshape(4, -1)).reshape(4, 100, 100)
-
-    ax.plot_surface(*sphere_points[:3], alpha=0.5, color='blue', label='original')
-    ax.plot_surface(*sphere_t[:3],      alpha=0.5, color='red',  label='transformed')
+    ax.set_aspect('equal')
+    # ax.quiver(0,0,0, 1,0,0, color='red')
+    # ax.quiver(0,0,0, 0,1,0, color='blue')
+    # ax.quiver(0,0,0, 0,0,1, color='green')
+    # ax.quiver(translation, rotation[:3, 0][0], rotation[:3, 0][1], rotation[:3, 0][2], color='blue', normalize=True)
+    # ax.quiver(translation.ravel(), rotation[:3, 0][0], rotation[:3, 1][1], rotation[:3, 1][2], color='red', normalize=True)
+    # ax.quiver(translation.ravel(), rotation[:3, 2], color='green', normalize=True)
+    plt.show()
