@@ -2,6 +2,7 @@ import time
 import sys
 import logging
 import signal
+import itertools
 import pyrealsense2 as rs
 import numpy as np
 from multiprocessing.shared_memory import SharedMemory
@@ -15,11 +16,16 @@ from bin_picking.common.helper import load_dict_from_json, get_project_dir
 
 
 class RealSenseCamera(Camera):
+    # To get unique names for the logger.
+    _counter = itertools.count()
 
     def __init__(self, serial: Optional[str]='', adv: Optional[str]='', align: Optional[bool]=True):
         
         self._ctx = rs.context()
         self._dual = align
+        
+        # Logger will get the name RealSenseCamera_numberOfObject. Starts with 0.
+        self.logger = logging.getLogger(f'{__class__.__name__}_{self._counter}')
 
         if align:
             self._align = rs.align(rs.stream.color)
@@ -31,7 +37,6 @@ class RealSenseCamera(Camera):
         else:
             self._get_serial()
 
-        self.logger = logging.getLogger(f'RealSense_{self._serial}')
 
         self._pipeline = rs.pipeline()
         self._config = rs.config()
@@ -75,7 +80,7 @@ class RealSenseCamera(Camera):
 
     def start(self):
         self.logger.info('Start pipeline.')
-        self._profile = self._pipeline.start()
+        self._profile = self._pipeline.start(self._config)
 
     def get_depth(self, num_frames: int=1):
         return self._get_data(num_frames=num_frames, mode='depth')

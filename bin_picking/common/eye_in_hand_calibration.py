@@ -86,77 +86,81 @@ def main(**kwargs):
     count = 0
     # Buffer storing Data objects (transform, depth, color) for deferred parallel processing.
     buf: List[Data] = []
-    h, w = cam.color_resolution
-    shape = (w, h, 3) # Turn the resolution into np shape.
-    size = int(np.prod(shape)) * np.dtype(np.uint8).itemsize # w * h * 3 * 1
 
-    shm = SharedMemory(create=True, size=size)
-    lock = Lock()
-    frame_event = Event()
+    if not kwargs['skip']:
+        h, w = cam.color_resolution
+        shape = (w, h, 3) # Turn the resolution into np shape.
+        size = int(np.prod(shape)) * np.dtype(np.uint8).itemsize # w * h * 3 * 1
 
-    while True:
-        p = Process(target=cam.stream_parallel, args=(shm.name, lock, frame_event, shape), daemon=True)
-        logger.info(f'Iteration: {count}')
-        cam.stop()
-        p.start()
-        img = np.ndarray(shape, dtype=np.uint8, buffer=shm.buf)
-        clean = None
+        shm = SharedMemory(create=True, size=size)
+        lock = Lock()
+        frame_event = Event()
 
         while True:
-            frame_event.wait(timeout=1.0)
+            p = Process(target=cam.stream_parallel, args=(shm.name, lock, frame_event, shape), daemon=True)
+            logger.info(f'Iteration: {count}')
+            cam.stop()
+            p.start()
+            img = np.ndarray(shape, dtype=np.uint8, buffer=shm.buf)
+            clean = None
 
-            if not frame_event.is_set():
+            while True:
+                frame_event.wait(timeout=1.0)
+
+                if not frame_event.is_set():
+                    continue
+
+                frame_event.clear()
+
+                with lock:
+                    frame = img.copy()
+                
+                clean = frame.copy()
+            
+                detections = get_aruco_codes(frame)
+
+                if detections:
+                    draw_aruco_codes(frame, detections)
+                else:
+                    logger.info("Couldn't find any ArUco markers.")
+
+                clone = undistort_img(frame, intrinsics)
+                cv.imshow('circles', clone)
+                cv.imshow('clean', clean)
+                key = cv.waitKey(1) & 0xFF
+
+                if key == ord("q"):
+                    break
+
+
+            p.terminate()
+            p.join()
+            cv.destroyAllWindows()
+            cam.start()
+            
+            cmd = prompt_cmd('Discard the image or use it.', {Cmd.DISCARD, Cmd.KEEP, Cmd.EXIT})
+            
+            if cmd == Cmd.EXIT:
+                break
+            elif cmd == Cmd.DISCARD:
                 continue
 
-            frame_event.clear()
+            count += 1
 
-            with lock:
-                frame = img.copy()
-            
-            clean = frame.copy()
-        
-            detections = get_aruco_codes(frame)
+            depth = take_pic(cam, processor)
+            T     = get_robot_transform(robot)
+            clean = clean if clean is not None else np.zeros(shape)
 
-            if detections:
-                draw_aruco_codes(frame, detections)
-            else:
-                logger.info("Couldn't find any ArUco markers.")
-
-            clone = undistort_img(frame, intrinsics)
-            cv.imshow('circles', clone)
-            cv.imshow('clean', clean)
-            key = cv.waitKey(1) & 0xFF
-
-            if key == ord("q"):
-                break
+            data = Data(T=T, depth=depth, color=undistort_img(clean, intrinsics))
+            buf.append(data)
+        shm.close()
+        shm.unlink()
+    else: 
+        load_buf(buf_path)
 
 
-        p.terminate()
-        p.join()
-        cv.destroyAllWindows()
-        cam.start()
-        
-        cmd = prompt_cmd('Discard the image or use it.', {Cmd.DISCARD, Cmd.KEEP, Cmd.EXIT})
-        
-        if cmd == Cmd.EXIT:
-            break
-        elif cmd == Cmd.DISCARD:
-            continue
-
-        count += 1
-
-        depth = take_pic(cam, processor)
-        T     = get_robot_transform(robot)
-        clean = clean if clean is not None else np.zeros(shape)
-
-        data = Data(T=T, depth=depth, color=undistort_img(clean, intrinsics))
-        buf.append(data)
-    
-
-    shm.close()
-    shm.unlink()
-
-    store_buf(buf, buf_path)
+    if not kwargs['skip']:
+        store_buf(buf, buf_path)
 
     # Process all buffered frames once the capture loop has ended.
     point_3d_list, marker_list = process_buf(buf, intrinsics, processor, mapping)
@@ -244,6 +248,10 @@ def store_buf(buf: list, path: Path) -> None:
             grp.create_dataset('depth', data=d.depth)
             grp.create_dataset('color', data=d.color)
 
+def load_buf(buf_path: Path) -> List['Data']:
+    with h5py.File(buf_path, 'r') as f:
+        pass
+    return [Data(T=np.zeros((1,1)), depth=np.zeros((1,1)), color=np.zeros((1,1)))]
 
 def get_robot_info_from_buf(buf: list) -> list:
     """
@@ -346,9 +354,8 @@ def get_aruco_codes(color: np.ndarray) -> Dict[int, np.ndarray]:
     """
     gray            = cv.cvtColor(color, cv.COLOR_BGR2GRAY)
     dictionary      = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
-    parameters      = aruco.DetectorParameters()
-    detector        = aruco.ArucoDetector(dictionary, parameters)
-    corners, ids, _ = detector.detectMarkers(gray)
+    parameters      = aruco.DetectorParameters_create()
+    corners, ids, _ = aruco.detectMarkers(gray, dictionary, parameters)
 
     if ids is None:
         return {}
@@ -930,6 +937,7 @@ if __name__ == '__main__':
     filtered = rclpy.utilities.remove_ros_args(sys.argv)
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('--skip', action='store_true', default=False)
     args   = parser.parse_args(filtered[1:])
 
     main(**vars(args))
