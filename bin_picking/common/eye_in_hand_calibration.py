@@ -265,8 +265,14 @@ def store_buf(buf: list, path: Path) -> None:
 
 def load_buf(buf_path: Path) -> List['Data']:
     with h5py.File(buf_path, 'r') as f:
-        pass
-    return [Data(T=np.zeros((1,1)), depth=np.zeros((1,1)), color=np.zeros((1,1)))]
+        buf = []
+        for key in f.keys():
+            grp = f[key]
+            T     = grp['T'][:]
+            depth = grp['depth'][:]
+            color = grp['color'][:]
+            buf.append(Data(T=T, depth=depth, color=color))
+    return buf
 
 def get_robot_info_from_buf(buf: list) -> list:
     """
