@@ -60,6 +60,7 @@ def main(**kwargs):
     extract 3D point clouds and circle positions for each frame, after which
     OpenCV's hand-eye calibration is run and the result is persisted.
     """
+    kwargs = get_args(**kwargs)
     project_dir      = get_project_dir()
     data_path        = project_dir / 'data'
     cfg_path         = data_path   / 'cfg'
@@ -95,12 +96,16 @@ def main(**kwargs):
         shm = SharedMemory(create=True, size=size)
         lock = Lock()
         frame_event = Event()
+        startup_event = Event()
 
         while True:
-            p = Process(target=cam.stream_parallel, args=(shm.name, lock, frame_event, shape), daemon=True)
+            p = Process(target=cam.stream_parallel, args=(shm.name, lock, frame_event, shape, startup_event), daemon=True)
             logger.info(f'Iteration: {count}')
             cam.stop()
             p.start()
+            startup_event.wait()
+            startup_event.clear()
+            frame_event.clear()
             img = np.ndarray(shape, dtype=np.uint8, buffer=shm.buf)
             clean = None
 
@@ -348,14 +353,15 @@ def get_aruco_codes(color: np.ndarray) -> Dict[int, np.ndarray]:
     Args:
         color: BGR input image.
 
-    Returns:
+    Retur
         Dict mapping marker ID (int) to uint16 array [cx, cy, radius].
         Empty dict if no markers are detected.
     """
     gray            = cv.cvtColor(color, cv.COLOR_BGR2GRAY)
-    dictionary      = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
-    parameters      = aruco.DetectorParameters_create()
-    corners, ids, _ = aruco.detectMarkers(gray, dictionary, parameters)
+    dictionary      = aruco.getPredefinedDictionary(aruco.DICT_4X4_250)
+    params          = aruco.DetectorParameters()
+    detector        = aruco.ArucoDetector(dictionary, params)
+    corners, ids, _ = detector.detectMarkers(gray)
 
     if ids is None:
         return {}
@@ -933,11 +939,13 @@ def prompt_cmd(prompt: str, valid: Set["Cmd"], max_tries: int = 5) -> Cmd:
     raise RuntimeError(f"No valid input after {max_tries} tries.")
 
 
-if __name__ == '__main__':
+def get_args(**kwargs):
     filtered = rclpy.utilities.remove_ros_args(sys.argv)
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--skip', action='store_true', default=False)
     args   = parser.parse_args(filtered[1:])
 
-    main(**vars(args))
+    kwargs.update(vars(args))
+
+    return kwargs
