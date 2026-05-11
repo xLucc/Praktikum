@@ -9,6 +9,7 @@ import os
 import numpy as np
 import cv2 as cv
 import cv2.aruco as aruco
+import matplotlib.pyplot as plt
 from pyzbar.pyzbar import decode as decode_qr
 from pathlib import Path
 from typing import Optional, Union, Tuple, Set, List, Dict
@@ -960,3 +961,26 @@ def get_args(**kwargs):
     kwargs.update(vars(args))
 
     return kwargs
+
+def plot_calib_params(rotaion: np.ndarray, translation: np.ndarray):
+    T = np.eye(4)
+    T[:3, :3] = rotaion
+    T[:3, 3]  = translation.ravel()
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    theta, phi = np.meshgrid(np.linspace(0, 2*np.pi, 100), np.linspace(0, np.pi, 100))
+    sphere_radius = 0.05
+
+    sphere_points = np.array([
+        sphere_radius * np.cos(theta) * np.sin(phi),
+        sphere_radius * np.sin(theta) * np.sin(phi),
+        sphere_radius * np.cos(phi),
+        np.ones_like(theta)
+    ])  # (4, 100, 100)
+
+    sphere_t = (T @ sphere_points.reshape(4, -1)).reshape(4, 100, 100)
+
+    ax.plot_surface(*sphere_points[:3], alpha=0.5, color='blue', label='original')
+    ax.plot_surface(*sphere_t[:3],      alpha=0.5, color='red',  label='transformed')
