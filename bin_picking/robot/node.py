@@ -6,10 +6,10 @@ import sys
 from rclpy.impl import rcutils_logger
 from rclpy.client import Client
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 from rclpy.node import Node
 from bin_picking.common.helper import get_package_root
-from kr_msgs.srv import SetDiscreteOutput, MoveLinear, PauseMotion, ResumeMotion, SetCustomFrame, GetRobotPose, GetRobotState, GetSystemFrame
+from kr_msgs.srv import SetDiscreteOutput, MoveLinear, PauseMotion, ResumeMotion, SetCustomFrame, GetRobotPose, GetRobotState, GetSystemFrame, MoveJoint, SetSystemFrame, SelectJoggingFrame
 from kr_msgs.msg import SystemState
 
 
@@ -35,6 +35,9 @@ class RobotNode(Node):
         self._grp = self.create_client(GetRobotPose, 'kr/robot/get_robot_pose')
         self._grs = self.create_client(GetRobotState, 'kr/system/get_robot_state')
         self._gsf = self.create_client(GetSystemFrame, 'kr/robot/get_system_frame')
+        self._ptp = self.create_client(MoveJoint, 'kr/motion/move_joint')
+        self._ssf = self.create_client(SetSystemFrame, 'kr/robot/set_system_frame')
+        self._sjf = self.create_client(SelectJoggingFrame, 'kr/motion/select_jogging_frame')
         self._gss = self.create_subscription(SystemState, 'kr/system/state', self._state_cb_fill, 10)
 
     # Getter
@@ -73,6 +76,56 @@ class RobotNode(Node):
     def sys_state_full(self) -> tuple:
         with self._lock:
             return np.array(self._state_list), np.array(self._trq_list)
+
+    def set_sys_frame(self, pos, rot):
+        event = threading.Event()
+
+        def cb(future):
+            res = future.result().success
+            if res:
+                self._logger.info('Set system frame.')
+            else: 
+                self._logger.info("Couldn't set system frame.")
+
+            event.set()
+
+
+        msg = SetSystemFrame.Request()
+        msg.name = 'tcp'
+        msg.ref = 'tfc'
+        msg.pos = pos 
+        msg.rot = rot
+
+        f = self._ssf.call_async(msg)
+        f.add_done_callback(cb)
+
+        if not event.wait(5.0):
+            self._logger.info('Timeout.')
+        
+        
+    def select_jf(self, ref: int = 2):
+        event = threading.Event()
+        msg = SelectJoggingFrame.Request()
+        msg.ref = ref
+
+        def cb(future):
+            res = future.result().success
+
+            if res:
+                self._logger.info('Selected jogging frame.')
+            else: 
+                self._logger.info("Couldn't set jogging frame.")
+            
+            event.set()
+        
+        f = self._sjf.call_async(msg)
+        f.add_done_callback(cb)
+
+        
+        if not event.wait(5.0):
+            self._logger.info('Timeout')
+
+        
 
     
     def sys_frame(self, target: str, ref: str) -> Optional[np.ndarray]:
@@ -117,10 +170,39 @@ class RobotNode(Node):
         return val
 
 
+    # Setter
 
+    def move_pnp(self, pos: List[float]):
+        result = None
+        event = threading.Event()
+
+        msg = MoveJoint.Request()
+        msg.jsconf = pos
+        msg.ttype = 1
+        msg.tvalue = 1.0
+        msg.bpoint = 0
+        msg.btype = 0
+        msg.bvalue = 15.0
+        msg.sync = -1.0
+        msg.chaining = 1
+
+        def cb(future):
+            nonlocal result
+            result = future.result().success
+            event.set()
         
 
-    # Setter
+        f = self._ptp.call_async(msg)
+        f.add_done_callback(cb)
+
+        if not event.wait(5.0):
+            self._logger.info('Request failed.')
+            return result
+
+        self._logger.info('Request successfull.')
+        return result
+
+
 
     def move(self, config: dict) -> bool:
 
