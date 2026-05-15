@@ -181,7 +181,7 @@ def main(**kwargs):
         store_buf(buf, buf_path)
 
     # Process all buffered frames once the capture loop has ended.
-    point_3d_list, T_cam_2_target_list = process_buf(buf, intrinsics, processor, mapping)
+    T_cam_2_target_list = process_buf(buf, intrinsics, processor, mapping)
     # axis_list   = map_marker_to_3d(point_3d_list, marker_list)
     # invert_axis = mapping['invert_axis']
     # T_cam_2_target_list = [
@@ -432,7 +432,7 @@ def find_points(color: np.ndarray, mapping: dict) -> Tuple[np.ndarray, np.ndarra
     return detections[x_id], detections[y_id], detections[z_id]
 
 
-def process_buf(buf: list, intrinsics: dict, processor: ImageProcessing, mapping: dict) -> Tuple[list, list]:
+def process_buf(buf: list, intrinsics: dict, processor: ImageProcessing, mapping: dict) -> list:
     """
     Process all buffered frames in parallel.
 
@@ -456,21 +456,21 @@ def process_buf(buf: list, intrinsics: dict, processor: ImageProcessing, mapping
     max_workers = min(len(buf), cpu_count)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures_3d = [
-            executor.submit(filtering_and_construct_3d, d.color, d.depth, intrinsics, processor)
-            for d in buf
-        ]
+        # futures_3d = [
+        #     executor.submit(filtering_and_construct_3d, d.color, d.depth, intrinsics, processor)
+        #     for d in buf
+        # ]
         # futures_marker = [
         #     executor.submit(find_points, d.color, mapping)
         #     for d in buf
         # ]
         futures_charuco = [executor.submit(get_charuco_pose, d.color, intrinsics) for d in buf]
-        points_3d_list = [f.result() for f in futures_3d]
+        # points_3d_list = [f.result() for f in futures_3d]
         # marker_list   = [f.result() for f in futures_marker]
         charuco_list   = [f.result() for f in futures_charuco]
 
 
-    return points_3d_list, charuco_list
+    return charuco_list
 
 
 def filtering_and_construct_3d(color: np.ndarray, depth: np.ndarray, intrinsics: dict, processor: ImageProcessing) -> np.ndarray:
@@ -671,7 +671,7 @@ def load_hdf5(path: Path) -> dict:
         "fy":   mtx[1, 1],
         "ppx":  mtx[0, 2],
         "ppy":  mtx[1, 2],
-        "dist": dist[0],
+        "dist": dist.ravel(),
     }
 
 
@@ -910,7 +910,7 @@ def get_charuco_pose(color: np.ndarray, intrinsics: dict, board_size: tuple = (5
     ], dtype=np.float64)
 
     # dist = intrinsics["dist"]
-    dist = np.zeros(5)  # Assuming no distortion for simplicity; replace with actual dist if available.
+    dist = np.zeros(5)  # Is zero, because image was disorted before.
 
     # Create ArUco dictionary
     aruco_dict = cv.aruco.getPredefinedDictionary(aruco_dict_id)
@@ -1068,7 +1068,8 @@ def plot_calib_params(rotation: np.ndarray, translation: np.ndarray):
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
     translation = translation.ravel()
-    ax.scatter(0,0,0, translation)
+    ax.scatter(0,0,0)
+    ax.scatter(*translation)
     colors = ['red', 'blue', 'green']
     for i, c in enumerate(colors):
         direction = np.eye(3)[i]
