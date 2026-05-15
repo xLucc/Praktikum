@@ -65,6 +65,7 @@ class RealSenseCamera(Camera):
 
         self.logger.info('Done with initialisation.')
         self._profile = self._pipeline.start(self._config)
+        self._unit = self._dev.first_depth_sensor().get_depth_scale()
         self._warm_up()
 
     def __del__(self):
@@ -91,6 +92,10 @@ class RealSenseCamera(Camera):
     @property
     def color_resolution(self) -> tuple:
         return self._sensors_to_setup['color']['resolution']
+    
+    @property
+    def unit(self):
+        return self._unit
 
 
     def stream(self) ->np.ndarray:
@@ -311,3 +316,7 @@ class RealSenseCamera(Camera):
     def _warm_up(self):
         for _ in range(20):
             self._pipeline.wait_for_frames(timeout_ms=10000)
+
+def stream():
+    cam = RealSenseCamera()
+    cam.stream()
