@@ -4,7 +4,7 @@ import numpy as np
 class Camera(ABC):
 
     @abstractmethod
-    def get_rgb(self)->list:
+    def get_color(self)->list:
         pass
 
     @abstractmethod

@@ -18,8 +18,9 @@ from bin_picking.common.helper import load_dict_from_json, get_project_dir
 class RealSenseCamera(Camera):
     # To get unique names for the logger.
     _counter = itertools.count()
+    _DEFAULT_STREAM_CONFIG = {"color": {"resolution" : [640, 480], "fps" : 30}, "depth": {"resolution": [640, 480], "fps": 30}}
 
-    def __init__(self, serial: Optional[str]='', adv: Optional[str]='', align: Optional[bool]=True):
+    def __init__(self, serial: Optional[str]='', adv: Optional[str]='', align: Optional[bool]=True, cfg: Optional[str]=None):
         
         self._ctx = rs.context()
         self._dual = align
@@ -49,6 +50,19 @@ class RealSenseCamera(Camera):
         self._config_path.mkdir(parents=True, exist_ok=True)
         self._setup_cfg = self._config_path / 'setup_cfg.json'
 
+        if cfg is not None:
+            cfg_path = self._config_path / cfg
+            if not cfg_path.exists():
+                self.logger.warning("File not found. Using default.")
+                self._sensors_to_setup = self._DEFAULT_STREAM_CONFIG.copy()
+            self._sensors_to_setup = load_dict_from_json(cfg_path)
+        elif self._setup_cfg.exists():
+            self._sensors_to_setup = load_dict_from_json(self._setup_cfg)
+        else:
+            self.logger.info('No config found, using defaults.')
+            self._sensors_to_setup = self._DEFAULT_STREAM_CONFIG.copy()
+        
+
         if not self._setup_cfg.exists():
             raise FileNotFoundError('No setup file found.')
 
@@ -60,7 +74,6 @@ class RealSenseCamera(Camera):
             self.logger.info('Found advanced settings.')
             self._set_adv()
 
-        self._sensors_to_setup = load_dict_from_json(self._setup_cfg)
         self._setup_sensors()
 
         self.logger.info('Done with initialisation.')
@@ -86,7 +99,7 @@ class RealSenseCamera(Camera):
     def get_depth(self, num_frames: int=1):
         return self._get_data(num_frames=num_frames, mode='depth')
 
-    def get_rgb(self, num_frames: int=1):
+    def get_color(self, num_frames: int=1):
         return self._get_data(num_frames=num_frames, mode='color')
     
     @property
