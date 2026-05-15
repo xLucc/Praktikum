@@ -77,10 +77,13 @@ def main(**kwargs):
 
     rclpy.init(args=None)
 
-    cam       = RealSenseCamera(align=True, adv=str(cfg_path / 'high_density.json'))
-    robot     = RobotNode()
-    node      = threading.Thread(target=robot.spin, daemon=True)
-    node.start()
+    if not kwargs['skip']:
+        cam       = RealSenseCamera(align=True, adv=str(cfg_path / 'high_density.json'))
+        robot     = RobotNode()
+        node      = threading.Thread(target=robot.spin, daemon=True)
+        node.start()
+        robot.wait_for_service()
+
     processor = ImageProcessing(cfg_path=str(cfg_path / 'processing_cfg.json'))
 
     intrinsics = load_intrinsics(calibration_path / 'intrinsics.hdf5')
@@ -100,7 +103,10 @@ def main(**kwargs):
         frame_event = Event()
         exit_event = Event()
 
-        while True:
+        poses = get_poses()
+
+        for pos in poses:
+            _   = robot.move_pnp(pos)
             p = Process(target=cam.stream_parallel, args=(shm.name, lock, frame_event, shape, exit_event), daemon=True)
             logger.info(f'Iteration: {count}')
             cam.stop()
@@ -175,21 +181,17 @@ def main(**kwargs):
         store_buf(buf, buf_path)
 
     # Process all buffered frames once the capture loop has ended.
-    point_3d_list, marker_list = process_buf(buf, intrinsics, processor, mapping)
-    axis_list   = map_marker_to_3d(point_3d_list, marker_list)
-    invert_axis = mapping['invert_axis']
-    T_cam_2_target_list = [
-        construct_coordinate_system(Px=Px, Py=Py, Pz=Pz, invert_axis=invert_axis)
-        for Px, Py, Pz in axis_list
-    ]
+    point_3d_list, T_cam_2_target_list = process_buf(buf, intrinsics, processor, mapping)
+    # axis_list   = map_marker_to_3d(point_3d_list, marker_list)
+    # invert_axis = mapping['invert_axis']
+    # T_cam_2_target_list = [
+    #     construct_coordinate_system(Px=Px, Py=Py, Pz=Pz, invert_axis=invert_axis)
+    #     for Px, Py, Pz in axis_list
+    # ]
     T_base_2_tfp_list = get_robot_info_from_buf(buf)
 
     R_target_2_cam, t_target_2_cam = deconstruct_T_into_R_and_t(T_cam_2_target_list)
     R_tfp_2_base,   t_tfp_2_base   = deconstruct_T_into_R_and_t(T_base_2_tfp_list)
-
-
-    print(f'rotation {R_target_2_cam}')
-    print(f'translation {t_tfp_2_base}')
 
     R_cam_2_tfp, t_cam_2_tfp = cv.calibrateHandEye(
         R_gripper2base=R_tfp_2_base,
@@ -197,15 +199,19 @@ def main(**kwargs):
         R_target2cam=R_target_2_cam,
         t_target2cam=t_target_2_cam,
     )
-    R_cam_2_tfp = np.asarray(R_cam_2_tfp)
+    logger.info(f"Rotation: {R_cam_2_tfp}")
+    logger.info(f"Translation: {t_cam_2_tfp}")
 
-    logger.info(f'Rotation: {R_cam_2_tfp}')
-    logger.info(f'Translation: {t_cam_2_tfp}')
+    R_cam_2_tfp = np.asarray(R_cam_2_tfp)
     plot_calib_params(R_cam_2_tfp, t_cam_2_tfp)
     store_calib(R_cam_2_tfp, t_cam_2_tfp, hand_eye_path)
-                
+    X = np.eye(4)
+    X[:3, :3] = R_cam_2_tfp
+    X[:3, 3] = t_cam_2_tfp.ravel()
+    _,_,_  = axb_consistency_check(T_base_2_tfp_list, T_cam_2_target_list, X, logger)
+               
 def get_qr_codes(color: np.ndarray) -> np.ndarray:
-    """
+    """"
     Detect QR codes in a BGR image and return their bounding circle descriptors.
 
     For each detected QR code the bounding polygon is used to compute a
@@ -454,14 +460,17 @@ def process_buf(buf: list, intrinsics: dict, processor: ImageProcessing, mapping
             executor.submit(filtering_and_construct_3d, d.color, d.depth, intrinsics, processor)
             for d in buf
         ]
-        futures_marker = [
-            executor.submit(find_points, d.color, mapping)
-            for d in buf
-        ]
+        # futures_marker = [
+        #     executor.submit(find_points, d.color, mapping)
+        #     for d in buf
+        # ]
+        futures_charuco = [executor.submit(get_charuco_pose, d.color, intrinsics) for d in buf]
         points_3d_list = [f.result() for f in futures_3d]
-        marker_list   = [f.result() for f in futures_marker]
+        # marker_list   = [f.result() for f in futures_marker]
+        charuco_list   = [f.result() for f in futures_charuco]
 
-    return points_3d_list, marker_list
+
+    return points_3d_list, charuco_list
 
 
 def filtering_and_construct_3d(color: np.ndarray, depth: np.ndarray, intrinsics: dict, processor: ImageProcessing) -> np.ndarray:
@@ -578,7 +587,7 @@ def get_robot_transform(robot: RobotNode) -> np.ndarray:
         raise InvalidRobotTransform
 
     angles = euler_cords[1, :]
-    r      = R.from_euler('XYZ', angles, degrees=True)
+    r      = R.from_euler('xyz', angles, degrees=True)
 
     T = np.eye(4)
     T[:3, :3] = r.as_matrix()
@@ -876,6 +885,87 @@ def undistort_img(img: np.ndarray, intrinsics: dict) -> np.ndarray:
     return cv.undistort(img, mtx, intrinsics["dist"])
 
 
+def get_charuco_pose(color: np.ndarray, intrinsics: dict, board_size: tuple = (5, 7), square_length: float = 29.7, marker_length: float = 22.0, aruco_dict_id: int = cv.aruco.DICT_4X4_50
+):
+    """
+    Estimate target pose in camera frame using a self-created ChArUco board.
+
+    Args:
+        color: BGR image
+        intrinsics: dict with fx, fy, ppx, ppy, dist
+        board_size: (cols, rows) of chessboard
+        square_length: size of chessboard squares [m]
+        marker_length: size of ArUco markers [m]
+        aruco_dict_id: OpenCV dictionary ID
+
+    Returns:
+        4x4 homogeneous transform T_camera_target or None
+    """
+
+    # Build camera matrix K
+    K = np.array([
+        [intrinsics["fx"], 0, intrinsics["ppx"]],
+        [0, intrinsics["fy"], intrinsics["ppy"]],
+        [0, 0, 1]
+    ], dtype=np.float64)
+
+    # dist = intrinsics["dist"]
+    dist = np.zeros(5)  # Assuming no distortion for simplicity; replace with actual dist if available.
+
+    # Create ArUco dictionary
+    aruco_dict = cv.aruco.getPredefinedDictionary(aruco_dict_id)
+
+    # Create ChArUco board (THIS replaces your missing board variable)
+    board = cv.aruco.CharucoBoard(
+        board_size,
+        square_length,
+        marker_length,
+        aruco_dict
+    )
+
+    # Detect markers
+    gray = cv.cvtColor(color, cv.COLOR_BGR2GRAY)
+
+    detector = cv.aruco.ArucoDetector(aruco_dict)
+    corners, ids, _ = detector.detectMarkers(gray)
+
+    if ids is None or len(ids) < 4:
+        return None
+
+    # Interpolate ChArUco corners
+    charuco_detector = cv.aruco.CharucoDetector(board)
+    charuco_corners, charuco_ids, _, _ = charuco_detector.detectBoard(
+        image=gray, markerCorners=corners, markerIds=ids
+    )
+
+    if charuco_ids is None or len(charuco_ids) < 4:
+        return None
+
+    # Solve PnP
+    rvec = np.zeros((3, 1), dtype=np.float64) # Due to inconsistencies in OpenCV's API, these must be initialized as non-None arrays. Inplace vals and return vals will be the same.
+    tvec = np.zeros((3, 1), dtype=np.float64) # Due to inconsistencies in OpenCV's API, these must be initialized as non-None arrays. Inplace vals and return vals will be the same.
+
+    success, rvec, tvec = cv.aruco.estimatePoseCharucoBoard(
+        charuco_corners,
+        charuco_ids,
+        board,
+        K,
+        dist,
+        rvec,
+        tvec
+    )
+
+    if not success:
+        return None
+
+    # Homogeneous transform
+    R_mat, _ = cv.Rodrigues(rvec)
+    T = np.eye(4)
+    T[:3, :3] = R_mat
+    T[:3, 3] = tvec.flatten()
+    return T
+
+
 @dataclass
 class Data:
     """Container for a single synchronised capture: robot pose, depth image, color image."""
@@ -995,3 +1085,60 @@ def plot_calib_params(rotation: np.ndarray, translation: np.ndarray):
     # ax.quiver(translation.ravel(), rotation[:3, 0][0], rotation[:3, 1][1], rotation[:3, 1][2], color='red', normalize=True)
     # ax.quiver(translation.ravel(), rotation[:3, 2], color='green', normalize=True)
     plt.show()
+
+
+def axb_consistency_check(
+    T_gripper2base: List[np.ndarray],
+    T_target2cam: List[np.ndarray],
+    X: np.ndarray,
+    logger: logging.Logger
+) -> Tuple[float, float, np.ndarray]:
+    """
+    Evaluate the pairwise AX = XB residual error for a hand-eye calibration result.
+
+    For every frame pair (i, j), the relative gripper motion A_ij and the
+    corresponding relative target motion B_ij must satisfy A·X = X·B if X
+    (the camera-to-TCP transform) is correct *and* the input data is
+    consistent.  Large residuals indicate systematic errors in the inputs
+    (wrong Euler convention, unit mismatch, unsynchronised poses, …).
+
+    Args:
+        T_gripper2base: List of N 4×4 transforms (gripper pose in base frame).
+        T_target2cam:   List of N 4×4 transforms (target pose in camera frame).
+        X:              4×4 hand-eye calibration result (camera-to-gripper).
+
+    Returns:
+        mean_err:   Mean translational residual over all pairs [same unit as inputs].
+        max_err:    Worst-case translational residual.
+        all_errs:   1-D array of per-pair errors (length N*(N-1)/2), sorted ascending.
+    """
+    n = len(T_gripper2base)
+    assert n == len(T_target2cam), "Input lists must have the same length."
+    assert n >= 2, "Need at least 2 poses."
+
+    errs = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            A = np.linalg.inv(T_gripper2base[j]) @ T_gripper2base[i]
+            B = T_target2cam[j] @ np.linalg.inv(T_target2cam[i])
+
+            lhs = A @ X
+            rhs = X @ B
+            errs.append(np.linalg.norm(lhs[:3, 3] - rhs[:3, 3]))
+
+    all_errs = np.sort(errs)
+    mean_err = float(all_errs.mean())
+    std_err = float(all_errs.std())
+    max_err = float(all_errs.max())
+
+    logger.info(
+        f"AX=XB check  —  pairs: {len(all_errs)},\n"
+        f"mean: {mean_err:.2f}, median: {float(np.median(all_errs)):.2f},\n"
+        f'std: {std_err:.2f} \n'
+        f"max: {max_err:.2f}"
+    )
+
+    return mean_err, max_err, all_errs
+
+def get_poses() -> List[List[float]]:
+    return [[303.96, -1.44, 34.017, 116.6, -102.57, 67.25, -162.96], [303.96, -4.82, 25.72, 77.06, -70.928, 65.283, -212.66], [303.88, -45.27, -12.89, 117.86, -68.93, 25.78, -183.575], [304.184, -36.914, -48.26, 129.05, -72.485, -96.02, -199.15], [303.21, -28.26, 47.72, 106.65, -120.66, -99.99, -209.596], [303.22, -28.671, 48.33, 111.33, - 94.4, -8.629, -209.156], [303.246, 22.437, 52.847, 86.99, -178.609, -22.909, -117.668], [296.356, 45.564, 23.91, 44.607, -134.786, -56.17, -117.038], [295.96, -3.58, 62.334, 146.93, -201.735, 47.28, -122.426],[299.08, 24.59, 72.737, 119.25, -205.541, -13.916, -122.384], [299.178, 31.37, 52.86, 107.391, -222.389, -13.874, -85.276], [298.061, 42.588, 39.251, 71.808, -177.096, -38.584, -85.304], [288.662, 36.777, 23.168, 72.504, -149.748, -23.665, -87.585], [311.0, 14.811, 0.655, 114.82, -155.7, 7.19, -87.562], [310.586, -30.542, -5.491, 151.394, -125.278, 46.706, -87.465], [310.535, -3.147, -4.045, 159.86, -228.854, 98.951, -71.52], [295.611, 1.108, -28.090, 121.25, -286.025, 11.882, 30.828], [321.209, 9.887, 15.792, 121.163, -284.549, 54.833, -26.15],[320.824, -42.622, 7.936, 155.648, -270.687, 67.925, -54.392], [315.0, -47.0, -55.0, 149.0, -262.0, 92.0, -39.0], [299.0, 11.0, -1.0, 128.0, 46.0, 129.0, -84.0], [297.0, 40.0, -55.0, 93.0, 12.0, -135.0, -121.0]]
