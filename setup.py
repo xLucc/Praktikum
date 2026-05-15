@@ -23,7 +23,9 @@ setup(
             'torque_test = bin_picking.torque_test:main',
             'test = bin_picking.test:main',
             'camera_test = bin_picking.test.camera_test:main',
-            'handeye = bin_picking.common.eye_in_hand_calibration:main'
+            'handeye = bin_picking.common.eye_in_hand_calibration:main',
+            'stream = bin_picking.camera.camera:stream',
+            'pick_test = bin_picking.test.pickup_test:main'
         ],
     },
 )
