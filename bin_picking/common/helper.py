@@ -2,10 +2,13 @@ import json
 from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 
-# Return the src relative path
-# NOTE: This is hard coded, please check if the colcon path vary.
+# Return the workspace src directory dynamically by searching ancestor paths.
 def get_package_root() -> Path:
-    return Path(get_package_share_directory('bin_picking')).parents[3] / 'src'
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / 'src').is_dir():
+            return parent / 'src'
+    raise RuntimeError(f'Found no src directory in ancestors of {current}')
 
 def get_project_dir() -> Path:
     return get_package_root() / 'bin_picking'
