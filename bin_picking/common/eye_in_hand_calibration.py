@@ -25,6 +25,12 @@ from bin_picking.common.image_processing import ImageProcessing
 from bin_picking.common.helper import get_project_dir, load_dict_from_json
 from bin_picking.common.calibration_errors import *
 
+# --- Aruco ---
+ARUCO_DICT = aruco.DICT_4X4_250
+BOARD_SIZE = (5,7)
+MARKER_LENGTH = 22.0
+SQUARE_LENGTH = 29.7
+
 # --- Hough circle detection radius bounds (0 = unlimited) ---
 MIN_RADIUS = 0
 MAX_RADIUS = 0
@@ -86,7 +92,9 @@ def main(**kwargs):
 
     processor = ImageProcessing(cfg_path=str(cfg_path / 'processing_cfg.json'))
 
-    intrinsics = load_intrinsics(calibration_path / 'intrinsics.hdf5')
+    if kwargs['cam']:
+        intrinsics = load_intrinsics(calibration_path / 'intrinsics.hdf5')
+
     mapping    = get_mapping(cfg_path / 'mapping.json')
 
     count = 0
@@ -127,14 +135,7 @@ def main(**kwargs):
                     frame = img.copy()
                 
                 clean = frame.copy()
-            
-                detections = get_aruco_codes(frame)
 
-                if detections:
-                    draw_aruco_codes(frame, detections)
-
-                clone = undistort_img(frame, intrinsics)
-                cv.imshow('circles', clone)
                 cv.imshow('clean', clean)
                 key = cv.waitKey(1) & 0xFF
 
@@ -170,7 +171,7 @@ def main(**kwargs):
             T     = get_robot_transform(robot)
             clean = clean if clean is not None else np.zeros(shape)
 
-            data = Data(T=T, depth=depth, color=undistort_img(clean, intrinsics))
+            data = Data(T=T, depth=depth, color=clean)
             buf.append(data)
         shm.close()
         shm.unlink()
@@ -179,6 +180,9 @@ def main(**kwargs):
 
     if not kwargs['skip']:
         store_buf(buf, buf_path)
+
+    if not kwargs['cam']:
+        intrinsics = calibrate_camera_charuco(images=[d.color for d in buf])
 
     # Process all buffered frames once the capture loop has ended.
     T_cam_2_target_list = process_buf(buf, intrinsics, processor, mapping)
@@ -209,7 +213,86 @@ def main(**kwargs):
     X[:3, :3] = R_cam_2_tfp
     X[:3, 3] = t_cam_2_tfp.ravel()
     _,_,_  = axb_consistency_check(T_base_2_tfp_list, T_cam_2_target_list, X, logger)
-               
+
+
+def calibrate_camera_charuco(
+    images: List[np.ndarray],
+    board_size: Tuple[int, int] = BOARD_SIZE,
+    square_length_mm: float = SQUARE_LENGTH,
+    marker_length_mm: float = MARKER_LENGTH,
+    aruco_dict_type = ARUCO_DICT,
+) -> dict:
+    """
+    Calibrate a camera using ChArUco board images.
+
+    Args:
+        images:            List of grayscale or BGR images containing the ChArUco board.
+        board_size:        (squares_x, squares_y) — number of chessboard squares.
+        square_length_mm:  Side length of one chessboard square in millimeters.
+        marker_length_mm:  Side length of one ArUco marker in millimeters.
+        aruco_dict_type:   ArUco dictionary to use.
+
+    Returns:
+        dict with keys: fx, fy, cx, cy, dist, rms
+        dist is the full distortion coefficient vector (k1, k2, p1, p2 [, k3, ...]).
+
+    Raises:
+        ValueError: if fewer than 4 images yield usable corners.
+    """
+    aruco_dict = aruco.getPredefinedDictionary(aruco_dict_type)
+    board = aruco.CharucoBoard(
+        board_size,
+        square_length_mm,
+        marker_length_mm,
+        aruco_dict,
+    )
+    charuco_detector = aruco.CharucoDetector(
+        board,
+        aruco.CharucoParameters(),
+        aruco.DetectorParameters(),
+    )
+
+    all_charuco_corners: list = []
+    all_charuco_ids: list = []
+    image_size = None
+
+    for img in images:
+        gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        image_size = gray.shape[::-1]  # (width, height)
+
+        charuco_corners, charuco_ids, _, _ = charuco_detector.detectBoard(gray)
+
+        if charuco_ids is None or len(charuco_ids) < 4:
+            continue
+
+        all_charuco_corners.append(charuco_corners)
+        all_charuco_ids.append(charuco_ids)
+
+    if len(all_charuco_corners) < 4:
+        raise ValueError(
+            f"Only {len(all_charuco_corners)} usable frames — need at least 4. "
+            "Check board visibility and ArUco dictionary."
+        )
+    distCoeffs = np.zeros((5,1), dtype=np.float64)
+    rms, camera_matrix, dist_coeffs, _, _ = aruco.calibrateCameraCharuco(
+        charucoCorners=all_charuco_corners,
+        charucoIds=all_charuco_ids,
+        board=board,
+        imageSize=image_size,
+        cameraMatrix=None,
+        distCoeffs=distCoeffs,
+    )
+
+    return {
+        "fx":   float(camera_matrix[0, 0]),
+        "fy":   float(camera_matrix[1, 1]),
+        "ppx":   float(camera_matrix[0, 2]),
+        "ppy":   float(camera_matrix[1, 2]),
+        "dist": dist_coeffs.flatten(),
+        "rms":  float(rms),
+    }
+
+
 def get_qr_codes(color: np.ndarray) -> np.ndarray:
     """"
     Detect QR codes in a BGR image and return their bounding circle descriptors.
@@ -381,7 +464,7 @@ def get_aruco_codes(color: np.ndarray) -> Dict[int, np.ndarray]:
     Args:
         color: BGR input image.
 
-    Retur
+    Returns:
         Dict mapping marker ID (int) to uint16 array [cx, cy, radius].
         Empty dict if no markers are detected.
     """
@@ -885,7 +968,7 @@ def undistort_img(img: np.ndarray, intrinsics: dict) -> np.ndarray:
     return cv.undistort(img, mtx, intrinsics["dist"])
 
 
-def get_charuco_pose(color: np.ndarray, intrinsics: dict, board_size: tuple = (5, 7), square_length: float = 29.7, marker_length: float = 22.0, aruco_dict_id: int = cv.aruco.DICT_4X4_50
+def get_charuco_pose(color: np.ndarray, intrinsics: dict, board_size: tuple = BOARD_SIZE, square_length: float = SQUARE_LENGTH, marker_length: float = MARKER_LENGTH, aruco_dict_id: int = ARUCO_DICT
 ):
     """
     Estimate target pose in camera frame using a self-created ChArUco board.
@@ -909,8 +992,7 @@ def get_charuco_pose(color: np.ndarray, intrinsics: dict, board_size: tuple = (5
         [0, 0, 1]
     ], dtype=np.float64)
 
-    # dist = intrinsics["dist"]
-    dist = np.zeros(5)  # Is zero, because image was disorted before.
+    dist = intrinsics["dist"]
 
     # Create ArUco dictionary
     aruco_dict = cv.aruco.getPredefinedDictionary(aruco_dict_id)
@@ -1058,6 +1140,7 @@ def get_args(**kwargs):
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--skip', action='store_true', default=False)
+    parser.add_argument('--cam', action='store_true', default=False)
     args   = parser.parse_args(filtered[1:])
 
     kwargs.update(vars(args))
@@ -1142,4 +1225,25 @@ def axb_consistency_check(
     return mean_err, max_err, all_errs
 
 def get_poses() -> List[List[float]]:
-    return [[303.96, -1.44, 34.017, 116.6, -102.57, 67.25, -162.96], [303.96, -4.82, 25.72, 77.06, -70.928, 65.283, -212.66], [303.88, -45.27, -12.89, 117.86, -68.93, 25.78, -183.575], [304.184, -36.914, -48.26, 129.05, -72.485, -96.02, -199.15], [303.21, -28.26, 47.72, 106.65, -120.66, -99.99, -209.596], [303.22, -28.671, 48.33, 111.33, - 94.4, -8.629, -209.156], [303.246, 22.437, 52.847, 86.99, -178.609, -22.909, -117.668], [296.356, 45.564, 23.91, 44.607, -134.786, -56.17, -117.038], [295.96, -3.58, 62.334, 146.93, -201.735, 47.28, -122.426],[299.08, 24.59, 72.737, 119.25, -205.541, -13.916, -122.384], [299.178, 31.37, 52.86, 107.391, -222.389, -13.874, -85.276], [298.061, 42.588, 39.251, 71.808, -177.096, -38.584, -85.304], [288.662, 36.777, 23.168, 72.504, -149.748, -23.665, -87.585], [311.0, 14.811, 0.655, 114.82, -155.7, 7.19, -87.562], [310.586, -30.542, -5.491, 151.394, -125.278, 46.706, -87.465], [310.535, -3.147, -4.045, 159.86, -228.854, 98.951, -71.52], [295.611, 1.108, -28.090, 121.25, -286.025, 11.882, 30.828], [321.209, 9.887, 15.792, 121.163, -284.549, 54.833, -26.15],[320.824, -42.622, 7.936, 155.648, -270.687, 67.925, -54.392], [315.0, -47.0, -55.0, 149.0, -262.0, 92.0, -39.0], [299.0, 11.0, -1.0, 128.0, 46.0, 129.0, -84.0], [297.0, 40.0, -55.0, 93.0, 12.0, -135.0, -121.0]]
+    return [[303.96, -1.44, 34.017, 116.6, -102.57, 67.25, 23.0],
+            [303.96, -4.82, 25.72, 77.06, -70.928, 65.283, -26.0], 
+            [303.88, -45.27, -12.89, 117.86, -68.93, 25.78, -19.0],
+            [304.184, -36.914, -48.26, 129.05, -72.485, -96.02, -7.0],
+            [303.21, -28.26, 47.72, 106.65, -120.66, -99.99, -24.0],
+            [303.22, -28.671, 48.33, 111.33, - 94.4, -8.629, -17.0], 
+            [303.246, 22.437, 52.847, 86.99, -178.609, -22.909, 61.0],
+            [296.356, 45.564, 23.91, 44.607, -134.786, -56.17, 51.0],
+            [295.96, -3.58, 62.334, 146.93, -201.735, 47.28, 58.0],
+            [299.08, 24.59, 72.737, 119.25, -205.541, -13.916, 61.0],
+            [299.178, 31.37, 52.86, 107.391, -222.389, -13.874, 106.0],
+            [298.061, 42.588, 39.251, 71.808, -177.096, -38.584, 73.0],
+            [288.662, 36.777, 23.168, 72.504, -149.748, -23.665, 72.0],
+            [311.0, 14.811, 0.655, 114.82, -155.7, 7.19, 94.9],
+            [310.586, -30.542, -5.491, 151.394, -125.278, 46.706, 84.5],
+            [310.535, -3.147, -4.045, 159.86, -228.854, 98.951, 102.0],
+            [295.611, 1.108, -28.090, 121.25, -286.025, 11.882, 217.0],
+            [321.209, 9.887, 15.792, 121.163, -284.549, 54.833, 148.0],
+            [320.824, -37.0, 12.0, 153.0, -265.0, 65.0, 118.0],
+            [315.0, -47.0, -55.0, 149.0, -262.0, 92.0, 148.0],
+            [299.0, 10.0, -0.3, 128.0, 46.0, 128.0, 101.0],
+            [297.0, 40.0, -55.0, 93.0, 12.0, -135.0, 59.0]]
