@@ -5,22 +5,38 @@ import signal
 import itertools
 import pyrealsense2 as rs
 import numpy as np
+from multiprocessing import Process, Lock, Value
 from multiprocessing.shared_memory import SharedMemory
 import cv2 as cv
-from pathlib import Path
-import json
-from abc import ABC, abstractmethod
 from typing import Optional
 from bin_picking.camera.camera_interface import Camera
 from bin_picking.common.helper import load_dict_from_json, get_project_dir
 
 
 class RealSenseCamera(Camera):
+    """
+    Thin wrapper around pyrealsense2 for the bin-picking pipeline.
+
+    Supports two acquisition modes:
+    - **Direct** (default): `get_depth()` / `get_color()` block and return frames on demand.
+    - **Buffered** (`buffering=True`): a background process continuously captures frames
+      into shared memory; callers read the latest via `newest_frame`.
+
+    Args:
+        serial:    RealSense serial number. If empty the first available device is used.
+        adv:       Filename of a RealSense advanced-settings JSON preset (e.g. ``high_density.json``),
+                   resolved relative to ``data/realsense_config/``. D400 series only.
+        align:     If True, depth frames are aligned to the color frame before returning.
+        cfg:       Filename of a stream-configuration JSON in ``data/realsense_config/``.
+                   Falls back to ``setup_cfg.json``, then built-in defaults (640×480 @ 30 fps).
+        buffering: Enable shared-memory buffering mode.
+    """
+
     # To get unique names for the logger.
     _counter = itertools.count()
     _DEFAULT_STREAM_CONFIG = {"color": {"resolution" : [640, 480], "fps" : 30}, "depth": {"resolution": [640, 480], "fps": 30}}
 
-    def __init__(self, serial: Optional[str]='', adv: Optional[str]='', align: Optional[bool]=True, cfg: Optional[str]=None):
+    def __init__(self, serial: Optional[str]='', adv: Optional[str]='', align: Optional[bool]=True, cfg: Optional[str]=None, buffering: bool = False):
         
         self._ctx = rs.context()
         self._dual = align
@@ -75,31 +91,62 @@ class RealSenseCamera(Camera):
             self._set_adv()
 
         self._setup_sensors()
+        
+        if buffering:
+            self._buf = True
+            self._init_buf()
+        else:
+            self._buf = False
+            self._profile = self._pipeline.start(self._config)  
+            self._warm_up()
 
-        self.logger.info('Done with initialisation.')
-        self._profile = self._pipeline.start(self._config)
         self._unit = self._dev.first_depth_sensor().get_depth_scale()
-        self._warm_up()
+        self.logger.info('Done with initialisation.')
 
     def __del__(self):
         self.logger.info('Clean up.')
 
         if hasattr(self, '_profile'):
             self._pipeline.stop()
-        
+    
+
+    def start_stream(self):
+        time.sleep(0.01)
+        self._p.start()
+
+    def stop_stream(self):
+        if self._p.is_alive():
+            self._p.terminate()
 
     def stop(self):
+        """Stop the RealSense pipeline. Only valid in direct (non-buffered) mode."""
+        self._mode_guard()
         self.logger.info('Stop the pipeline.')
         self._pipeline.stop()
 
     def start(self):
+        """Start the RealSense pipeline. Only valid in direct (non-buffered) mode."""
+        self._mode_guard()
         self.logger.info('Start pipeline.')
         self._profile = self._pipeline.start(self._config)
 
-    def get_depth(self, num_frames: int=1):
+    def get_depth(self, num_frames: int = 1) -> list:
+        """
+        Capture ``num_frames`` raw uint16 depth frames (aligned to color if ``align=True``).
+
+        Returns a list of H×W uint16 numpy arrays in depth-sensor units (multiply by
+        ``self.unit`` to get metres).
+        """
+        self._mode_guard()
         return self._get_data(num_frames=num_frames, mode='depth')
 
-    def get_color(self, num_frames: int=1):
+    def get_color(self, num_frames: int = 1) -> list:
+        """
+        Capture ``num_frames`` BGR uint8 color frames.
+
+        Returns a list of H×W×3 uint8 numpy arrays.
+        """
+        self._mode_guard()
         return self._get_data(num_frames=num_frames, mode='color')
     
     @property
@@ -110,6 +157,22 @@ class RealSenseCamera(Camera):
     def unit(self):
         return self._unit
 
+    @property
+    def newest_frame(self):
+        with self._lock:
+            depth = self._depth[self._idx.value % 3 - 1, :].copy()
+            color = self._color[self._idx.value % 3 - 1, :].copy()
+        
+        return color, depth
+    
+    @property
+    def shm(self):
+        return self.depth_shm.name , self.color_shm.name
+    
+    @property
+    def index(self):
+        return self._idx
+    
 
     def stream(self) ->np.ndarray:
 
@@ -122,6 +185,8 @@ class RealSenseCamera(Camera):
         Raises:
             KeyboardInterrupt: To exit the stream.
         '''
+
+        self._mode_guard()
 
         self.logger.info('To save the image, press s. \n To quit the stream, press q.')
 
@@ -146,6 +211,7 @@ class RealSenseCamera(Camera):
 
 
     def stream_parallel(self, name, lock, frame_event, shape, exit_event):
+        self._mode_guard()
         self.start()
         shm = SharedMemory(name=name, create=False)
         img = np.ndarray(shape, dtype=np.uint8, buffer=shm.buf)
@@ -163,9 +229,9 @@ class RealSenseCamera(Camera):
             if not frame:
                 continue
             
-            aquired = lock.acquire(timeout=1.0)
+            acquired = lock.acquire(timeout=1.0)
 
-            if not aquired:
+            if not acquired:
                 continue
             
             try:
@@ -179,18 +245,62 @@ class RealSenseCamera(Camera):
         self.stop()
 
 
+    def _stream_buf(self, h, w):
+
+        stop = False
+
+        def handle_sigterm(signum, frame):
+            nonlocal stop
+            stop = True
+
+        self._profile = self._pipeline.start(self._config)
+        self._warm_up()
+
+        depth_shm = SharedMemory(name=self.depth_shm.name, create=False)
+        color_shm = SharedMemory(name=self.color_shm.name, create=False)
+        
+        depth = np.ndarray(shape=(3, w, h), dtype=np.uint16, buffer=depth_shm.buf)
+        color = np.ndarray(shape=(3, w, h, 3), dtype=np.uint8, buffer=self.color_shm.buf)
+
+        last = time.perf_counter()
+        signal.signal(signal.SIGTERM, handle_sigterm)
+
+        while not stop:
+
+            if (time.perf_counter() - last) < 0.01:
+                continue
+
+            try:
+                frame = self._pipeline.wait_for_frames()
+            except RuntimeError:
+                logging.getLogger(__name__).error("Frames didn't arrive.")
+                depth_shm.close()
+                color_shm.close()
+                sys.exit(1)
+
+            if self._dual:
+                frame = self._align.process(frame)
+            
+            with self._lock:
+                depth[self._idx.value % 3, :] = np.asanyarray(frame.get_depth_frame().get_data())
+                color[self._idx.value % 3, :] = np.asanyarray(frame.get_color_frame().get_data())
+
+                self._idx.value += 1
+            
+            last = time.perf_counter()
+
+        depth_shm.close()
+        color_shm.close()
+        
+
+
     def _get_data(self, num_frames, mode):
         frames = []
-        # start_fill = time.time()
         self._fill_frames(num_frames, frames)
-        # self.logger.info(f'Took {(time.time() - start_fill):.4f} sec.')
 
-        # start_align = time.time()
-        if self._dual: 
+        if self._dual:
             frames = [self._align.process(f) for f in frames]
 
-        # res = time.time() - start_align
-        # self.logger.info(f'Took {res:.4f} sec')
         if mode == 'depth':
             return [np.asarray(d.get_depth_frame().get_data()) for d in frames]
         else:
@@ -209,6 +319,20 @@ class RealSenseCamera(Camera):
 
             frames.append(frame)
             time.sleep(0.015)
+
+
+    def _init_buf(self):
+        h, w = max(self._sensors_to_setup['color']["resolution"], self._sensors_to_setup["depth"]["resolution"])
+        size = h * w * 3
+        self.depth_shm = SharedMemory(create=True, size=size * np.dtype(np.uint16).itemsize)
+        self.color_shm = SharedMemory(create=True, size=size * np.dtype(np.uint8).itemsize * 3)
+
+        self._depth = np.ndarray((3, w, h), dtype=np.uint16, buffer=self.depth_shm.buf)
+        self._color = np.ndarray((3, w, h, 3), dtype=np.uint8, buffer=self.color_shm.buf)
+
+        self._p = Process(target=self._stream_buf, args=(h, w, ), daemon=True)
+        self._idx = Value("i", 0)
+        self._lock = Lock()
 
 
 
@@ -232,7 +356,7 @@ class RealSenseCamera(Camera):
 
                 except RuntimeError as e:
                     if 'busy' in str(e).lower():
-                        print(f'Device {serial} is busy.')
+                        self.logger.warning(f'Device {serial} is busy.')
                         continue
                     raise e
                 
@@ -250,7 +374,7 @@ class RealSenseCamera(Camera):
 
     def _set_adv(self):
 
-        # Only avialable for D400 Series.
+        # Only available for D400 Series.
         if not 'D400' in self._product_line:
             self.logger.warning('No advanced settings available for this device.')
             return
@@ -327,9 +451,9 @@ class RealSenseCamera(Camera):
                 continue
 
     def _warm_up(self):
-        for _ in range(20):
-            self._pipeline.wait_for_frames(timeout_ms=10000)
-
-def stream():
-    cam = RealSenseCamera()
-    cam.stream()
+        for _ in range(10):
+            self._pipeline.wait_for_frames(timeout_ms=5000)
+    
+    def _mode_guard(self):
+        if self._buf:
+            raise RuntimeError("Can't call this method, while using the buffer.")

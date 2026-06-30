@@ -1,0 +1,13 @@
+{
+    "_note": "Bin geometry in robot world/base frame (mm). world_pos = bin center, size = inner [width, depth, height].",
+    "world_pos": [
+        620.71,
+        -703.43,
+        240.76
+    ],
+    "size": [
+        205.59,
+        284.49,
+        120.0
+    ]
+}

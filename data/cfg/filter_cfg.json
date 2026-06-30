@@ -1,0 +1,8 @@
+{
+    "_note": "placeholder values -- tune once model training has converged",
+    "confidence": 0.6,
+    "percentile": 0.5,
+    "iou_threshold": 0.7,
+    "area_tolerance": 0.2,
+    "pick": null
+}

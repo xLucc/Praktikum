@@ -3,6 +3,3 @@ class CalibrationError(Exception):
 
 class InvalidRobotTransform(CalibrationError):
     pass
-
-class FalseIndexing(CalibrationError):
-    pass

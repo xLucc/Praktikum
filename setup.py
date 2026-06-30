@@ -25,7 +25,17 @@ setup(
             'camera_test = bin_picking.test.camera_test:main',
             'handeye = bin_picking.common.eye_in_hand_calibration:main',
             'stream = bin_picking.camera.camera:stream',
-            'pick_test = bin_picking.test.pickup_test:main'
+            'pick_test = bin_picking.test.pickup_test:main',
+            'offset=bin_picking.test.offset:main',
+            'test_jog=bin_picking.robot.node:test',
+            "control=bin_picking.test.light_control:main",
+            "tune=bin_picking.test.tune_pid:main",
+            "show=bin_picking.test.show:main",
+            "pick=bin_picking.pipeline.run:main",
+            "pick_loop=bin_picking.pipeline.loop:main",
+            "hover_bin=bin_picking.test.hover_bin:main",
+            "calibrate_bin=bin_picking.test.calibrate_bin:main",
+            "show_mesh=bin_picking.test.show_mesh:main"
         ],
     },
 )
